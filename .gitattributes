@@ -1,0 +1,44 @@
+# Normalise line endings so a clone behaves the same on every platform.
+#
+# This matters beyond tidiness: the API image's entrypoint is a POSIX shell
+# script. Checked out with CRLF on a Windows machine with core.autocrlf=true, the
+# container fails at `#!/bin/sh\r` with a confusing "no such file or directory"
+# and `docker compose up` never comes green.
+
+* text=auto eol=lf
+
+# Always LF, regardless of platform or local git settings.
+*.sh        text eol=lf
+*.py        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.md        text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.sql       text eol=lf
+*.mako      text eol=lf
+*.ini       text eol=lf
+Dockerfile  text eol=lf
+.env.example text eol=lf
+
+# Lockfiles: keep verbatim, never reformat.
+uv.lock        text eol=lf -diff
+pnpm-lock.yaml text eol=lf -diff linguist-generated
+
+# Binary — never touch.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.pdf  binary

@@ -1,0 +1,140 @@
+# Local development stack for the configurable CRM.
+#
+# `docker compose up` from a fresh clone must give a green /health.
+# Nothing here contains customer-specific configuration — a workspace's country
+# code, timezone, currency and taxonomy are rows in the database, never env vars.
+
+name: configurable-crm
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crm_local_password}
+      POSTGRES_DB: ${POSTGRES_DB:-crm}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm} -d ${POSTGRES_DB:-crm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crm_minio_user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-crm_minio_password}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # One-shot: creates the attachment bucket the API health check probes.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crm_minio_user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-crm_minio_password}
+      S3_BUCKET: ${S3_BUCKET:-crm-attachments}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 \"$${MINIO_ROOT_USER}\" \"$${MINIO_ROOT_PASSWORD}\" &&
+      mc mb --ignore-existing local/$${S3_BUCKET} &&
+      echo 'bucket ready:' $${S3_BUCKET}
+      "
+    restart: "no"
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm_local_password}@postgres:5432/${POSTGRES_DB:-crm}
+      DATABASE_ECHO: ${DATABASE_ECHO:-false}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-crm_minio_user}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-crm_minio_password}
+      S3_BUCKET: ${S3_BUCKET:-crm-attachments}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      # Both loopback spellings: a browser treats localhost and 127.0.0.1 as
+      # distinct origins, and Playwright drives the app on 127.0.0.1.
+      CORS_ORIGINS: '["http://localhost:${WEB_PORT:-5173}","http://127.0.0.1:${WEB_PORT:-5173}"]'
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+    volumes:
+      - ./web:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  web_node_modules:

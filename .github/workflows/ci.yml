@@ -1,0 +1,139 @@
+# CI — lint, typecheck and tests for both halves of the repo, plus a job that
+# proves the M0 acceptance criterion: a fresh clone runs `docker compose up` and
+# `/health` comes back green.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '22'
+
+jobs:
+  api:
+    name: API — lint, types, tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: mypy (strict)
+        run: uv run mypy app
+
+      # Postgres comes from testcontainers, using the Docker daemon that is
+      # already running on the GitHub-hosted runner.
+      - name: pytest
+        run: uv run pytest -q
+
+  web:
+    name: Web — lint, types, e2e
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: eslint
+        run: pnpm lint
+
+      - name: prettier --check
+        run: pnpm format:check
+
+      - name: tsc --noEmit
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm vite build
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Playwright
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  stack:
+    name: Stack — docker compose up, /health green
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No .env is written on purpose: docker-compose.yml carries local defaults
+      # for every variable, so this is exactly what a fresh clone does.
+      - name: docker compose up
+        run: docker compose up -d --build --wait --wait-timeout 300
+
+      - name: GET /health
+        run: |
+          set -euo pipefail
+          body=$(curl --silent --show-error --fail --max-time 20 http://localhost:8000/health)
+          echo "$body" | jq .
+          test "$(echo "$body" | jq -r .status)" = "ok"
+          for check in database redis object_storage; do
+            test "$(echo "$body" | jq -r ".checks.${check}.status")" = "ok"
+          done
+
+      - name: GET / (web)
+        run: curl --silent --show-error --fail --max-time 20 http://localhost:5173/ > /dev/null
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: docker compose down
+        if: always()
+        run: docker compose down --volumes --remove-orphans

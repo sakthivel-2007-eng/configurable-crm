@@ -1,0 +1,75 @@
+# Pre-commit hooks.
+#
+# Install once per clone:   uvx pre-commit install
+# Run against everything:   uvx pre-commit run --all-files
+#
+# The language-specific hooks are `local` on purpose: they shell out to the
+# project's own toolchain (`uv` for the API, `pnpm` for the web app) so tool
+# versions have exactly one source of truth — api/pyproject.toml and
+# web/package.json — instead of being pinned a second time in this file and
+# drifting from CI.
+
+default_install_hook_types: [pre-commit]
+fail_fast: false
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^web/pnpm-lock\.yaml$
+      - id: end-of-file-fixer
+        exclude: ^web/pnpm-lock\.yaml$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      # CLAUDE.md: never commit secrets.
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format (api)
+        entry: uv run --directory api ruff format
+        language: system
+        pass_filenames: false
+        files: ^api/.*\.py$
+
+      - id: ruff-check
+        name: ruff check (api)
+        entry: uv run --directory api ruff check --fix
+        language: system
+        pass_filenames: false
+        files: ^api/.*\.py$
+
+      - id: mypy
+        name: mypy strict (api/app)
+        entry: uv run --directory api mypy app
+        language: system
+        pass_filenames: false
+        files: ^api/.*\.py$
+
+      - id: eslint
+        name: eslint (web)
+        entry: pnpm --dir web lint
+        language: system
+        pass_filenames: false
+        files: ^web/.*\.(ts|tsx|js|mjs|cjs)$
+
+      - id: prettier
+        name: prettier (web)
+        entry: pnpm --dir web format:check
+        language: system
+        pass_filenames: false
+        files: ^web/.*\.(ts|tsx|js|mjs|cjs|css|json|md|html)$
+
+      - id: tsc
+        name: tsc --noEmit (web)
+        entry: pnpm --dir web typecheck
+        language: system
+        pass_filenames: false
+        files: ^web/.*\.(ts|tsx)$

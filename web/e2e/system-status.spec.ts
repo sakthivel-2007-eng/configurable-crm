@@ -1,11 +1,26 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { stubApi } from './fixtures/api'
+
 /**
  * Smoke test: the app boots, calls /health, and renders the result.
  *
  * The API is stubbed so the test stays hermetic — `docker compose up` plus a
  * green /health is verified separately, against the real stack.
+ *
+ * The page sits behind authentication from M1: it renders the raw error text
+ * from Postgres, Redis and S3, and an anonymous visitor should not learn a
+ * backing service's hostname from a failed connection message.
  */
+
+async function signInThenOpenStatus(page: Page) {
+  await page.goto('/login')
+  await page.getByLabel('Email').fill('owner@example.com')
+  await page.getByLabel('Password').fill('correct-horse-battery-staple')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+  await page.getByRole('link', { name: 'System' }).click()
+}
 
 const HEALTH_ROUTE = '**/api/v1/health'
 
@@ -42,9 +57,11 @@ async function stubHealth(page: Page, statusCode: number, body: unknown) {
 }
 
 test('renders a green report when every backing service is healthy', async ({ page }) => {
+  await stubApi(page)
+  // Registered after the catch-all so it wins for /health.
   await stubHealth(page, 200, healthPayload({ status: 'ok', redisStatus: 'ok', redisError: null }))
 
-  await page.goto('/')
+  await signInThenOpenStatus(page)
 
   await expect(page.getByTestId('overall-status')).toHaveText('All systems operational')
   await expect(page.getByTestId('service-identity')).toContainText('Configurable CRM API')
@@ -55,6 +72,7 @@ test('renders a green report when every backing service is healthy', async ({ pa
 })
 
 test('renders a degraded report and the failure detail', async ({ page }) => {
+  await stubApi(page)
   await stubHealth(
     page,
     503,
@@ -65,11 +83,17 @@ test('renders a degraded report and the failure detail', async ({ page }) => {
     }),
   )
 
-  await page.goto('/')
+  await signInThenOpenStatus(page)
 
   await expect(page.getByTestId('overall-status')).toHaveText('Degraded')
   await expect(page.getByTestId('check-redis').getByTestId('check-status')).toHaveText('error')
   await expect(page.getByTestId('check-redis').getByTestId('check-error')).toContainText(
     'connection refused',
   )
+})
+
+test('the status page is not reachable without signing in', async ({ page }) => {
+  await stubApi(page)
+  await page.goto('/status')
+  await expect(page).toHaveURL(/\/login/)
 })

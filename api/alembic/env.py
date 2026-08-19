@@ -15,6 +15,9 @@ from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Importing the models package registers every mapper on `Base.metadata`.
+# Without it, autogenerate sees an empty schema and cheerfully drops the world.
+import app.models  # noqa: F401
 from app.config import get_settings
 from app.db import Base
 

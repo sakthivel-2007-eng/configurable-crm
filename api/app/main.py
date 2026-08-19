@@ -14,10 +14,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth.passwords import PasswordHasherService
 from app.cache import create_redis
 from app.config import Settings, get_settings
 from app.db import create_engine, create_session_factory
+from app.routers import auth as auth_router
 from app.routers import health as health_router
+from app.routers import members as members_router
+from app.routers import permission_templates as permission_templates_router
+from app.routers import workspaces as workspaces_router
 from app.services.health import HealthService
 from app.storage import create_s3_client
 
@@ -43,6 +48,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         redis=redis,
         s3=s3,
     )
+    # Built once: the constructor computes a throwaway hash with the live
+    # argon2 parameters, which is deliberately expensive.
+    app.state.password_hasher = PasswordHasherService(settings)
 
     logger.info("api.startup", extra={"environment": settings.environment})
     try:
@@ -82,6 +90,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router.router, include_in_schema=False)
     # Versioned mount for API clients.
     app.include_router(health_router.router, prefix=resolved.api_v1_prefix)
+
+    # Unscoped: how a caller authenticates and finds the workspaces they may
+    # then address.
+    app.include_router(auth_router.router, prefix=resolved.api_v1_prefix)
+    app.include_router(workspaces_router.router, prefix=resolved.api_v1_prefix)
+    # Tenant data. Every route below this prefix resolves a workspace scope
+    # before it touches the database.
+    tenant_prefix = f"{resolved.api_v1_prefix}/workspaces/{{workspace_id}}"
+    app.include_router(members_router.router, prefix=tenant_prefix)
+    app.include_router(permission_templates_router.router, prefix=tenant_prefix)
 
     return app
 

@@ -5,6 +5,10 @@ hardcoded fallbacks — every value must come from the environment.
 
 Postgres comes from a real container: JSONB and expression indexes, which this
 product leans on from M2 onward, do not behave the same on SQLite.
+
+Redis is faked. Login rate limiting is the only thing that needs it in M1, and
+its behaviour is fixed-window counting with a TTL — a dict with expiry proves
+that correctly and keeps the suite runnable without a second container.
 """
 
 from __future__ import annotations
@@ -21,14 +25,34 @@ os.environ.setdefault("S3_ACCESS_KEY_ID", "test-access-key")
 os.environ.setdefault("S3_SECRET_ACCESS_KEY", "test-secret-key")
 os.environ.setdefault("S3_BUCKET", "test-bucket")
 os.environ.setdefault("CORS_ORIGINS", '["http://localhost:5173"]')
+os.environ.setdefault("JWT_SECRET_KEY", "test-signing-key-at-least-32-characters-long")
+# Keep argon2 cheap in tests: the suite hashes a password per fixture, and the
+# production cost parameters make that dominate the run time.
+os.environ.setdefault("ARGON2_MEMORY_COST_KIB", "8192")
+os.environ.setdefault("ARGON2_TIME_COST", "1")
+# The per-IP refresh budget defaults to 120 so a NAT'd office is not throttled;
+# proving it trips would mean 121 requests. Lowered here only. The per-token
+# budget is left at its production value, because 11 requests is already cheap
+# and testing the real number is worth more than testing a stand-in.
+# Each test gets its own FakeRedis, so counters never leak between tests.
+os.environ.setdefault("REFRESH_RATE_LIMIT_IP_ATTEMPTS", "20")
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.community.postgres import PostgresContainer
+from tests.fakes import FakeRedis
 
+from app.auth.passwords import PasswordHasherService
 from app.config import Settings, get_settings
+from app.db import Base
+from app.dependencies import get_session
 from app.main import create_app
 
 POSTGRES_IMAGE = "postgres:16-alpine"
@@ -40,19 +64,36 @@ def settings() -> Settings:
 
 
 @pytest.fixture(scope="session")
-def postgres_container() -> Iterator[PostgresContainer]:
-    """A throwaway Postgres 16, shared by the whole test session."""
+def postgres_container() -> Iterator[PostgresContainer | None]:
+    """A throwaway Postgres 16, shared by the whole test session.
+
+    Skipped entirely when `TEST_DATABASE_URL` points at an existing server —
+    see `postgres_async_dsn`.
+    """
+    if os.environ.get("TEST_DATABASE_URL"):
+        yield None
+        return
     with PostgresContainer(POSTGRES_IMAGE) as container:
         yield container
 
 
 @pytest.fixture(scope="session")
-def postgres_async_dsn(postgres_container: PostgresContainer) -> str:
-    """asyncpg DSN for the container.
+def postgres_async_dsn(postgres_container: PostgresContainer | None) -> str:
+    """asyncpg DSN for the test database.
 
-    Built by hand rather than via `get_connection_url`, whose readiness probe
-    uses a synchronous driver.
+    `TEST_DATABASE_URL` wins when set, which lets a developer run against a
+    local server without Docker. CI leaves it unset and gets the pinned
+    Postgres 16 container — the version the product targets, and the one whose
+    JSONB and expression-index behaviour M2 onward depends on.
+
+    The container DSN is built by hand rather than via `get_connection_url`,
+    whose readiness probe uses a synchronous driver.
     """
+    external = os.environ.get("TEST_DATABASE_URL")
+    if external:
+        return external
+
+    assert postgres_container is not None
     host = postgres_container.get_container_host_ip()
     port = postgres_container.get_exposed_port(5432)
     return (
@@ -71,6 +112,47 @@ async def engine(postgres_async_dsn: str) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture
+async def schema_engine(postgres_async_dsn: str) -> AsyncIterator[AsyncEngine]:
+    """An engine with the full schema created and dropped around each test.
+
+    `create_all` rather than `alembic upgrade head`: the migration is verified
+    separately in `test_migrations.py`, and rebuilding from metadata keeps each
+    test independent without a per-test container.
+    """
+    created = create_async_engine(postgres_async_dsn)
+    async with created.begin() as connection:
+        await connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS citext")
+        await connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        yield created
+    finally:
+        async with created.begin() as connection:
+            await connection.run_sync(Base.metadata.drop_all)
+            await connection.exec_driver_sql("DROP TYPE IF EXISTS availability_status")
+        await created.dispose()
+
+
+@pytest.fixture
+def session_factory(schema_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(
+        bind=schema_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+
+@pytest.fixture
+async def db_session(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    """A plain session for arranging fixtures directly."""
+    async with session_factory() as session:
+        yield session
+
+
+@pytest.fixture
 def app(settings: Settings) -> FastAPI:
     """The application without its lifespan.
 
@@ -81,7 +163,43 @@ def app(settings: Settings) -> FastAPI:
 
 
 @pytest.fixture
+def wired_app(
+    app: FastAPI,
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> FastAPI:
+    """The application with a live database, a fake Redis and a hasher.
+
+    The session override yields *one* session per request, matching production,
+    so the workspace scoping applied to it in a request is the same scoping the
+    handler's later queries run under.
+    """
+    app.state.redis = FakeRedis()
+    app.state.password_hasher = PasswordHasherService(settings)
+    app.state.session_factory = session_factory
+
+    async def override_get_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            try:
+                yield session
+            except Exception:
+                await session.rollback()
+                raise
+
+    app.dependency_overrides[get_session] = override_get_session
+    return app
+
+
+@pytest.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+        yield http_client
+
+
+@pytest.fixture
+async def api(wired_app: FastAPI) -> AsyncIterator[AsyncClient]:
+    """An HTTP client against the fully wired application."""
+    transport = ASGITransport(app=wired_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as http_client:
         yield http_client

@@ -116,7 +116,7 @@ at `localhost`:
 ```bash
 cd api
 uv sync
-uv run alembic upgrade head          # no revisions in M0; proves Alembic is wired
+uv run alembic upgrade head          # M1: tenancy, auth and user lifecycle
 uv run uvicorn app.main:app --reload
 ```
 
@@ -142,6 +142,26 @@ cd web && pnpm lint && pnpm format:check && pnpm typecheck && pnpm test:e2e
 `pytest` starts a real **Postgres 16 container** via testcontainers — Docker must
 be running. SQLite is not an option here: JSONB and expression indexes, which the
 data model leans on from M2 onward, do not behave the same way.
+
+Without Docker, point the suite at any Postgres 16+ you already have:
+
+```bash
+createdb crm_test
+cd api && TEST_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/crm_test uv run pytest
+```
+
+CI leaves `TEST_DATABASE_URL` unset so it always runs against the pinned
+Postgres 16 image.
+
+The migration is checked separately — it must apply, match the models, and roll
+back:
+
+```bash
+cd api
+uv run alembic upgrade head
+uv run alembic check        # fails if the models and the revision have drifted
+uv run alembic downgrade base
+```
 
 Playwright needs its browser once per machine:
 

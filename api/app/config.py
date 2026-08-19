@@ -55,6 +55,39 @@ class Settings(BaseSettings):
     s3_bucket: str
     s3_region: str = "us-east-1"
 
+    # --- Auth --------------------------------------------------------------
+    # No default: a deployment without an explicitly configured signing key
+    # must fail to boot rather than sign tokens with something guessable.
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    access_token_ttl_minutes: int = 30
+    refresh_token_ttl_days: int = 30
+
+    # Argon2id parameters. Defaults follow the OWASP "second recommended"
+    # configuration (46 MiB, t=1, p=1); raise memory_cost on bigger hosts.
+    argon2_time_cost: int = 1
+    argon2_memory_cost_kib: int = 47104
+    argon2_parallelism: int = 1
+
+    # Login rate limiting, enforced in Redis on two keys: the submitted email
+    # and the client IP. Either tripping refuses the attempt.
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_seconds: int = 300
+
+    # Refresh rate limiting (02-api-contract.md: "/auth/refresh — Rotates.
+    # Rate-limited."). Two budgets, because the two keys guard different things
+    # and a single number cannot serve both:
+    #
+    # - Per token: a refresh token is legitimately presented exactly once, so
+    #   any repeat is a client stuck in a loop or a stolen token being replayed.
+    #   A tight budget costs a well-behaved client nothing.
+    # - Per IP: a DoS backstop only. It must stay generous because an office
+    #   behind one NAT address shares it — at a 30-minute access-token life,
+    #   120 per 5 minutes still covers several hundred concurrent sessions.
+    refresh_rate_limit_attempts: int = 10
+    refresh_rate_limit_ip_attempts: int = 120
+    refresh_rate_limit_window_seconds: int = 300
+
     # --- Health ------------------------------------------------------------
     health_check_timeout_seconds: float = 5.0
 
@@ -64,6 +97,14 @@ class Settings(BaseSettings):
         """The engine is async; a sync DSN would fail confusingly at first query."""
         if not value.startswith("postgresql+asyncpg://"):
             raise ValueError("DATABASE_URL must use the postgresql+asyncpg:// driver")
+        return value
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _require_strong_secret(cls, value: str) -> str:
+        """A short signing key is a forgeable signing key."""
+        if len(value) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 characters")
         return value
 
     @property

@@ -13,6 +13,16 @@ dependencies = [
     "alembic>=1.14.0",
     "redis>=5.2.0",
     "boto3>=1.35.0",
+    "argon2-cffi>=23.1.0",
+    "pyjwt>=2.10.0",
+    "openpyxl>=3.1.5",
+    "python-multipart>=0.0.20",
+    "email-validator>=2.2.0",
+    # Ships the IANA database. Windows has no system tzdata, so without this
+    # `ZoneInfo("America/New_York")` raises there — which would make workspace
+    # creation reject every timezone, and the M8 scheduler unable to evaluate
+    # cron in the workspace's zone.
+    "tzdata>=2025.1",
 ]
 
 [dependency-groups]
@@ -80,7 +90,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["^alembic/versions/"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*"]
+module = ["testcontainers.*", "openpyxl.*"]
 ignore_missing_imports = true
 
 # --- pytest ----------------------------------------------------------------

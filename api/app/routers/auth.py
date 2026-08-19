@@ -1,0 +1,249 @@
+"""Auth endpoints.
+
+Thin: credential checks, the licence and activity gates, and token lifecycle all
+live in `app.services.auth`. What this file owns is the HTTP shape — status
+codes, the rate-limit header, and the fact that `/auth/*` and `/me/*` sit
+outside the workspace prefix.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.deps import (
+    CurrentUser,
+    get_auth_rate_limiter,
+    get_current_user,
+    get_password_hasher,
+    get_token_service,
+)
+from app.auth.passwords import PasswordHasherService
+from app.auth.rate_limit import AuthRateLimiter, RateLimitExceededError
+from app.auth.tokens import TokenService
+from app.dependencies import get_session
+from app.errors import api_error, not_found
+from app.models import Membership
+from app.schemas.auth import (
+    ChangePasswordRequest,
+    LoginRequest,
+    LogoutRequest,
+    MembershipSummary,
+    MeResponse,
+    RefreshRequest,
+    ResolvedPermissions,
+    TokenResponse,
+    UserSummary,
+)
+from app.services.auth import AuthService
+from app.tenancy.scoping import resolve_visible_membership_ids
+
+router = APIRouter(tags=["auth"])
+
+
+def _auth_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    tokens: Annotated[TokenService, Depends(get_token_service)],
+    hasher: Annotated[PasswordHasherService, Depends(get_password_hasher)],
+) -> AuthService:
+    return AuthService(session, tokens=tokens, hasher=hasher)
+
+
+def _membership_summaries(memberships: list[Membership]) -> list[MembershipSummary]:
+    return [
+        MembershipSummary(
+            id=membership.id,
+            workspace=membership.workspace,
+            template_id=membership.template_id,
+            template_name=membership.template.name,
+            is_active=membership.is_active,
+            has_license=membership.has_license,
+            availability=membership.availability.value,
+            manager_id=membership.manager_id,
+        )
+        for membership in memberships
+    ]
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+@router.post(
+    "/auth/login",
+    response_model=TokenResponse,
+    summary="Exchange credentials for a token pair",
+)
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    service: Annotated[AuthService, Depends(_auth_service)],
+    limiter: Annotated[AuthRateLimiter, Depends(get_auth_rate_limiter)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TokenResponse:
+    email = str(payload.email)
+    client_ip = _client_ip(request)
+
+    try:
+        await limiter.check_login(email=email, client_ip=client_ip)
+    except RateLimitExceededError as exc:
+        raise api_error(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Too many login attempts. Try again shortly.",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+
+    user = await service.authenticate(email=email, password=payload.password)
+    memberships = await service.load_memberships(user)
+    # Only reached with valid credentials, so `no_license` and `member_inactive`
+    # cannot be used to probe which addresses are real.
+    service.assert_can_access_any_workspace(memberships)
+
+    pair = await service.issue_tokens(user)
+    await session.commit()
+    await limiter.reset_login(email=email, client_ip=client_ip)
+
+    return TokenResponse(
+        access_token=pair.access_token,
+        refresh_token=pair.refresh_token,
+        token_type=pair.token_type,
+        expires_in=pair.expires_in_seconds,
+        user=UserSummary.model_validate(user),
+        memberships=_membership_summaries(memberships),
+    )
+
+
+@router.post(
+    "/auth/refresh",
+    response_model=TokenResponse,
+    summary="Rotate a refresh token",
+)
+async def refresh(
+    payload: RefreshRequest,
+    request: Request,
+    service: Annotated[AuthService, Depends(_auth_service)],
+    limiter: Annotated[AuthRateLimiter, Depends(get_auth_rate_limiter)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TokenResponse:
+    # Checked before the token is looked up, so a client that is over budget
+    # cannot use the endpoint to probe which token values exist.
+    try:
+        await limiter.check_refresh(
+            refresh_token=payload.refresh_token,
+            client_ip=_client_ip(request),
+        )
+    except RateLimitExceededError as exc:
+        raise api_error(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Too many refresh attempts. Try again shortly.",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+
+    user, pair = await service.rotate(payload.refresh_token)
+    memberships = await service.load_memberships(user)
+    await session.commit()
+
+    return TokenResponse(
+        access_token=pair.access_token,
+        refresh_token=pair.refresh_token,
+        token_type=pair.token_type,
+        expires_in=pair.expires_in_seconds,
+        user=UserSummary.model_validate(user),
+        memberships=_membership_summaries(memberships),
+    )
+
+
+@router.post(
+    "/auth/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke the presented refresh token's family",
+)
+async def logout(
+    payload: LogoutRequest,
+    service: Annotated[AuthService, Depends(_auth_service)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    # Deliberately does not report whether the token was already invalid:
+    # logging out is idempotent and should not be a token-validity oracle.
+    await service.logout(payload.refresh_token)
+    await session.commit()
+
+
+@router.post(
+    "/auth/change-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Change the caller's password and end every other session",
+)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    service: Annotated[AuthService, Depends(_auth_service)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    await service.change_password(
+        current_user,
+        current=payload.current_password,
+        replacement=payload.new_password,
+    )
+    await session.commit()
+
+
+@router.get("/me", response_model=MeResponse, summary="The caller and their memberships")
+async def me(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    service: Annotated[AuthService, Depends(_auth_service)],
+) -> MeResponse:
+    memberships = await service.load_memberships(current_user)
+    return MeResponse(
+        user=UserSummary.model_validate(current_user),
+        memberships=_membership_summaries(memberships),
+    )
+
+
+@router.get(
+    "/me/permissions",
+    response_model=ResolvedPermissions,
+    summary="Resolved capabilities for one workspace",
+)
+async def my_permissions(
+    workspace_id: Annotated[uuid.UUID, Query(description="Workspace to resolve against")],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[AuthService, Depends(_auth_service)],
+) -> ResolvedPermissions:
+    """What the frontend builds its UI from.
+
+    Not a member of that workspace? 404, same as any other cross-workspace
+    read — answering "you have no permissions there" would confirm it exists.
+    """
+    memberships = await service.load_memberships(current_user)
+    membership = next((m for m in memberships if m.workspace_id == workspace_id), None)
+    if membership is None or not membership.is_active:
+        raise not_found("Workspace")
+
+    visible = await resolve_visible_membership_ids(
+        session,
+        workspace_id=workspace_id,
+        membership_id=membership.id,
+    )
+    capabilities = {
+        group: {name: bool(value) for name, value in flags.items()}
+        for group, flags in membership.template.capabilities.items()
+        if isinstance(flags, dict)
+    }
+    sees_all = any(flags.get("admin_access") for flags in capabilities.values())
+
+    return ResolvedPermissions(
+        workspace_id=workspace_id,
+        membership_id=membership.id,
+        template_id=membership.template_id,
+        template_name=membership.template.name,
+        capabilities=capabilities,
+        visible_membership_ids=sorted(visible),
+        sees_all_members=sees_all,
+    )

@@ -90,6 +90,11 @@ services:
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-crm_minio_password}
       S3_BUCKET: ${S3_BUCKET:-crm-attachments}
       S3_REGION: ${S3_REGION:-us-east-1}
+      # No default: an unset signing key must stop the container starting
+      # rather than let it sign tokens with something predictable.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
+      ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
       # Both loopback spellings: a browser treats localhost and 127.0.0.1 as
       # distinct origins, and Playwright drives the app on 127.0.0.1.
       CORS_ORIGINS: '["http://localhost:${WEB_PORT:-5173}","http://127.0.0.1:${WEB_PORT:-5173}"]'

@@ -19,9 +19,12 @@ from app.cache import create_redis
 from app.config import Settings, get_settings
 from app.db import create_engine, create_session_factory
 from app.routers import auth as auth_router
+from app.routers import fields as fields_router
 from app.routers import health as health_router
+from app.routers import leads as leads_router
 from app.routers import members as members_router
 from app.routers import permission_templates as permission_templates_router
+from app.routers import pipeline as pipeline_router
 from app.routers import workspaces as workspaces_router
 from app.services.health import HealthService
 from app.storage import create_s3_client
@@ -100,6 +103,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     tenant_prefix = f"{resolved.api_v1_prefix}/workspaces/{{workspace_id}}"
     app.include_router(members_router.router, prefix=tenant_prefix)
     app.include_router(permission_templates_router.router, prefix=tenant_prefix)
+    app.include_router(fields_router.router, prefix=tenant_prefix)
+    app.include_router(pipeline_router.router, prefix=tenant_prefix)
+    app.include_router(pipeline_router.custom_actions_router, prefix=tenant_prefix)
+    app.include_router(leads_router.router, prefix=tenant_prefix)
 
     return app
 

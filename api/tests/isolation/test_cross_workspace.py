@@ -85,6 +85,192 @@ M1_WORKSPACE_ROOT_ROUTES: list[tuple[str, str]] = [
     ("PATCH", ""),
 ]
 
+# --- M2: the field definition engine -----------------------------------------
+
+# Settings collections. A field, option or index belonging to B must never
+# appear in one of A's responses.
+M2_COLLECTION_ROUTES: list[str] = [
+    "/settings/lead-fields",
+    "/settings/indexed-fields",
+    # The two registries are product constants, not tenant data — they return
+    # the same 13 and 8 entries for every workspace. Listed so the coverage
+    # guard sees them; the list test below skips them for that reason.
+    "/settings/field-types",
+    "/settings/action-field-types",
+]
+
+#: Registry routes carry no tenant data, so "B's ids must not appear" is
+#: vacuous for them. They are still probed for the *access* check.
+M2_TENANT_FREE_ROUTES: frozenset[str] = frozenset(
+    {"/settings/field-types", "/settings/action-field-types"}
+)
+
+# Routes taking a field id. A's admin must not reach B's field by either
+# spelling — under A's workspace path or under B's.
+M2_FIELD_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/settings/lead-fields/{field_id}"),
+    ("PATCH", "/settings/lead-fields/{field_id}"),
+    ("POST", "/settings/lead-fields/{field_id}/hide"),
+    ("POST", "/settings/lead-fields/{field_id}/unhide"),
+    ("GET", "/settings/lead-fields/{field_id}/options"),
+    ("POST", "/settings/lead-fields/{field_id}/options"),
+    ("POST", "/settings/lead-fields/{field_id}/options/bulk"),
+    ("PATCH", "/settings/lead-fields/{field_id}/options/reorder"),
+    ("DELETE", "/settings/indexed-fields/{field_id}"),
+]
+
+M2_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/settings/lead-fields"),
+    ("POST", "/settings/indexed-fields"),
+    ("PUT", "/settings/identity-field"),
+    ("PUT", "/settings/primary-fields"),
+]
+
+#: Two-id routes, each needing its own test because both ids must be checked.
+M2_TWO_ID_ROUTES: list[tuple[str, str]] = [
+    ("PATCH", "/settings/lead-fields/{field_id}/options/{option_id}"),
+    ("DELETE", "/settings/lead-fields/{field_id}/options/{option_id}"),
+    ("POST", "/settings/lead-fields/{field_id}/options/copy-from/{source_field_id}"),
+]
+
+# --- M3: pipeline and taxonomy -----------------------------------------------
+
+M3_COLLECTION_ROUTES: list[str] = [
+    "/settings/stages",
+    "/settings/lost-reasons",
+    "/settings/call-dispositions",
+    "/settings/custom-actions",
+    "/settings/preferences",
+]
+
+#: Routes taking a taxonomy id, tagged with which kind so the probe can aim a
+#: genuine, existing id from workspace B at workspace A.
+M3_ID_ROUTES: list[tuple[str, str, str]] = [
+    ("PATCH", "/settings/stages/{stage_id}", "stage"),
+    ("DELETE", "/settings/stages/{stage_id}", "stage"),
+    ("PATCH", "/settings/lost-reasons/{reason_id}", "lost_reason"),
+    ("DELETE", "/settings/lost-reasons/{reason_id}", "lost_reason"),
+    ("PATCH", "/settings/call-dispositions/{disposition_id}", "disposition"),
+    ("POST", "/settings/call-dispositions/{disposition_id}/set-default", "disposition"),
+    ("POST", "/settings/call-dispositions/{disposition_id}/archive", "disposition"),
+]
+
+M3_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/settings/stages"),
+    ("PATCH", "/settings/stages/reorder"),
+    ("POST", "/settings/lost-reasons"),
+    ("POST", "/settings/call-dispositions"),
+    ("PATCH", "/settings/preferences"),
+    ("POST", "/settings/custom-actions"),
+]
+
+#: Custom-action routes, which additionally sit behind a feature flag.
+M3_ACTION_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/settings/custom-actions/{type_id}"),
+    ("PATCH", "/settings/custom-actions/{type_id}"),
+    ("POST", "/settings/custom-actions/{type_id}/archive"),
+    ("GET", "/settings/custom-actions/{type_id}/fields"),
+    ("POST", "/settings/custom-actions/{type_id}/fields"),
+    ("DELETE", "/settings/custom-actions/{type_id}/fields/{field_id}"),
+]
+
+_M3_BODIES: dict[str, dict[str, object]] = {
+    "/settings/stages/{stage_id}": {"label": "Renamed"},
+    "/settings/lost-reasons/{reason_id}": {"label": "Renamed"},
+    "/settings/call-dispositions/{disposition_id}": {"label": "Renamed"},
+    "/settings/custom-actions/{type_id}": {"name": "Renamed"},
+    "/settings/custom-actions/{type_id}/fields": {"label": "Smuggled", "field_type": "TEXT"},
+}
+
+# --- M4: field-level permissions ---------------------------------------------
+
+M4_COLLECTION_ROUTES: list[str] = [
+    "/settings/permission-templates",
+    # A product constant like the type registries: the 13 group definitions are
+    # identical for every workspace.
+    "/settings/permission-templates/capability-schema",
+]
+
+M4_TENANT_FREE_ROUTES: frozenset[str] = frozenset(
+    {"/settings/permission-templates/capability-schema"}
+)
+
+M4_TEMPLATE_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/settings/permission-templates/{template_id}"),
+    ("PATCH", "/settings/permission-templates/{template_id}"),
+    ("DELETE", "/settings/permission-templates/{template_id}"),
+    ("GET", "/settings/permission-templates/{template_id}/field-grants"),
+    ("PUT", "/settings/permission-templates/{template_id}/field-grants"),
+    ("PUT", "/settings/permission-templates/{template_id}/field-grants/bulk"),
+    ("GET", "/settings/permission-templates/{template_id}/lead-view"),
+    ("PUT", "/settings/permission-templates/{template_id}/lead-view"),
+    ("GET", "/settings/permission-templates/{template_id}/assignees"),
+]
+
+M4_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/settings/permission-templates"),
+]
+
+_M4_BODIES: dict[str, dict[str, object]] = {
+    "/settings/permission-templates/{template_id}": {"name": "Renamed By An Outsider"},
+    "/settings/permission-templates/{template_id}/field-grants": {"grants": []},
+    "/settings/permission-templates/{template_id}/field-grants/bulk": {
+        "grant": "VIEW",
+        "value": True,
+    },
+    "/settings/permission-templates/{template_id}/lead-view": {"layout": []},
+}
+
+# --- M5: leads, actions, changesets, templates --------------------------------
+
+M5_COLLECTION_ROUTES: list[str] = ["/leads", "/changesets", "/templates"]
+
+M5_LEAD_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/leads/{lead_id}"),
+    ("PATCH", "/leads/{lead_id}"),
+    ("DELETE", "/leads/{lead_id}"),
+    ("GET", "/leads/{lead_id}/actions"),
+    ("POST", "/leads/{lead_id}/notes"),
+    ("POST", "/leads/{lead_id}/calls"),
+    ("POST", "/leads/{lead_id}/custom-actions"),
+    ("POST", "/leads/{lead_id}/messages"),
+]
+
+M5_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/leads"),
+    ("POST", "/templates"),
+]
+
+M5_TEMPLATE_ROUTES: list[tuple[str, str]] = [
+    ("DELETE", "/templates/{template_id}"),
+    ("POST", "/templates/{template_id}/render"),
+]
+
+_M5_BODIES: dict[str, dict[str, object]] = {
+    "/leads/{lead_id}": {"values": {"name": "Renamed By An Outsider"}},
+    "/leads/{lead_id}/notes": {"body": "smuggled note"},
+    "/leads/{lead_id}/calls": {
+        "direction": "OUTGOING",
+        "disposition_id": "00000000-0000-0000-0000-000000000000",
+        "duration_seconds": 1,
+    },
+    "/leads/{lead_id}/custom-actions": {
+        "action_type_id": "00000000-0000-0000-0000-000000000000",
+        "values": {},
+    },
+    "/leads/{lead_id}/messages": {"channel": "SMS", "body": "smuggled"},
+}
+
+#: Bodies for the M2 field routes, by route template. A write probe must send
+#: a *valid* body: a 422 for a malformed payload would mask whether the scoping
+#: check fired at all.
+_FIELD_BODIES: dict[str, dict[str, object]] = {
+    "/settings/lead-fields/{field_id}": {"label": "Renamed By An Outsider"},
+    "/settings/lead-fields/{field_id}/options": {"label": "Smuggled Option"},
+    "/settings/lead-fields/{field_id}/options/bulk": {"labels": ["Smuggled"]},
+    "/settings/lead-fields/{field_id}/options/reorder": {"ordered_ids": []},
+}
+
 _BODIES: dict[str, dict[str, object]] = {
     "PATCH": {"full_name": "Renamed By An Outsider"},
     "PUT": {"status": "ON_LEAVE", "note": "set by an outsider"},
@@ -467,6 +653,21 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(("GET", route) for route in M1_COLLECTION_ROUTES)
     declared.update(M1_COLLECTION_WRITE_ROUTES)
     declared.update(M1_WORKSPACE_ROOT_ROUTES)
+    declared.update(M2_FIELD_ROUTES)
+    declared.update(("GET", route) for route in M2_COLLECTION_ROUTES)
+    declared.update(M2_COLLECTION_WRITE_ROUTES)
+    declared.update(M2_TWO_ID_ROUTES)
+    declared.update((method, route) for method, route, _ in M3_ID_ROUTES)
+    declared.update(("GET", route) for route in M3_COLLECTION_ROUTES)
+    declared.update(M3_COLLECTION_WRITE_ROUTES)
+    declared.update(M3_ACTION_ROUTES)
+    declared.update(M4_TEMPLATE_ROUTES)
+    declared.update(("GET", route) for route in M4_COLLECTION_ROUTES)
+    declared.update(M4_COLLECTION_WRITE_ROUTES)
+    declared.update(M5_LEAD_ROUTES)
+    declared.update(("GET", route) for route in M5_COLLECTION_ROUTES)
+    declared.update(M5_COLLECTION_WRITE_ROUTES)
+    declared.update(M5_TEMPLATE_ROUTES)
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():
@@ -487,3 +688,174 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     # which would leave a test passing against nothing.
     stale = declared - mounted
     assert not stale, f"Isolation matrix lists routes that are not mounted: {sorted(stale)}"
+
+
+# --- 5. M2: the field definition engine --------------------------------------
+
+
+@pytest.mark.parametrize(("method", "template"), M2_FIELD_ROUTES)
+async def test_field_route_in_another_workspace_returns_404(
+    api: AsyncClient,
+    tenants: TenantPair,
+    method: str,
+    template: str,
+) -> None:
+    """A's admin, on A's own path, cannot address B's field by id.
+
+    Every workspace is provisioned with a `phone` field, so B always has one to
+    aim at — and its id is a real uuid, not a fabricated one, which is what
+    makes this a genuine probe rather than a 404-for-nonexistence.
+    """
+    path = tenants.a.path(template.format(field_id=tenants.b.builtin_field_id))
+    response = await api.request(
+        method,
+        path,
+        headers=tenants.a.owner.auth,
+        json=_FIELD_BODIES.get(template),
+    )
+
+    assert response.status_code == 404, (
+        f"{method} {template} reached workspace B's field: {response.status_code} {response.text}"
+    )
+    assert response.json()["detail"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize(("method", "template"), M2_FIELD_ROUTES)
+async def test_field_route_under_foreign_workspace_path_returns_404(
+    api: AsyncClient,
+    tenants: TenantPair,
+    method: str,
+    template: str,
+) -> None:
+    """Consistent ids, wrong caller: refused by the scoping dependency."""
+    path = tenants.b.path(template.format(field_id=tenants.b.builtin_field_id))
+    response = await api.request(
+        method,
+        path,
+        headers=tenants.a.owner.auth,
+        json=_FIELD_BODIES.get(template),
+    )
+    assert response.status_code == 404, (
+        f"{method} {template} let a non-member into workspace B: {response.text}"
+    )
+
+
+@pytest.mark.parametrize("route", M2_COLLECTION_ROUTES)
+async def test_settings_collections_never_contain_another_workspaces_ids(
+    api: AsyncClient,
+    tenants: TenantPair,
+    route: str,
+) -> None:
+    """Checked against the raw response text, so a leak through an
+    unanticipated field still fails."""
+    response = await api.get(tenants.a.path(route), headers=tenants.a.owner.auth)
+    assert response.status_code == 200, response.text
+
+    if route in M2_TENANT_FREE_ROUTES:
+        # A product constant: identical for every workspace, nothing to leak.
+        return
+
+    body = response.text
+    assert str(tenants.b.id) not in body
+    assert str(tenants.b.builtin_field_id) not in body
+
+
+@pytest.mark.parametrize(("method", "route"), M2_COLLECTION_WRITE_ROUTES)
+async def test_settings_writes_under_a_foreign_workspace_path_return_404(
+    api: AsyncClient,
+    tenants: TenantPair,
+    method: str,
+    route: str,
+) -> None:
+    """A's admin cannot create schema inside workspace B."""
+    bodies: dict[str, dict[str, object]] = {
+        "/settings/lead-fields": {"label": "Smuggled Field", "field_type": "TEXT"},
+        "/settings/indexed-fields": {"field_id": str(tenants.b.builtin_field_id)},
+        "/settings/identity-field": {"field_id": str(tenants.b.builtin_field_id)},
+        "/settings/primary-fields": {"h1_field_id": str(tenants.b.builtin_field_id)},
+    }
+    response = await api.request(
+        method, tenants.b.path(route), headers=tenants.a.owner.auth, json=bodies[route]
+    )
+    assert response.status_code == 404, response.text
+
+
+async def test_a_foreign_field_cannot_become_the_identity_field(
+    api: AsyncClient,
+    tenants: TenantPair,
+) -> None:
+    """The by-reference leak: the read is scoped but the foreign key might not
+    be. A's workspace must not be able to point its identity at B's field."""
+    response = await api.put(
+        tenants.a.path("/settings/identity-field"),
+        headers=tenants.a.owner.auth,
+        json={"field_id": str(tenants.b.builtin_field_id)},
+    )
+    assert response.status_code == 404
+
+
+async def test_a_foreign_field_cannot_become_a_primary_field(
+    api: AsyncClient,
+    tenants: TenantPair,
+) -> None:
+    response = await api.put(
+        tenants.a.path("/settings/primary-fields"),
+        headers=tenants.a.owner.auth,
+        json={"h1_field_id": str(tenants.b.builtin_field_id)},
+    )
+    assert response.status_code == 404
+
+
+async def test_options_cannot_be_copied_across_a_workspace_boundary(
+    api: AsyncClient,
+    tenants: TenantPair,
+) -> None:
+    """ "Copy options" reads a whole option set — the highest-value read in the
+    settings surface to get wrong."""
+    own = await api.post(
+        tenants.a.path("/settings/lead-fields"),
+        headers=tenants.a.owner.auth,
+        json={"label": "Target", "field_type": "DROPDOWN"},
+    )
+    assert own.status_code == 201
+    target_id = own.json()["id"]
+
+    response = await api.post(
+        tenants.a.path(
+            f"/settings/lead-fields/{target_id}/options/copy-from/{tenants.b.builtin_field_id}"
+        ),
+        headers=tenants.a.owner.auth,
+    )
+    assert response.status_code == 404
+
+
+async def test_a_foreign_option_cannot_be_edited_through_an_owned_field(
+    api: AsyncClient,
+    tenants: TenantPair,
+) -> None:
+    """Both ids are checked, not just the one in the outer path segment."""
+    field = await api.post(
+        tenants.a.path("/settings/lead-fields"),
+        headers=tenants.a.owner.auth,
+        json={"label": "Mine", "field_type": "DROPDOWN"},
+    )
+    field_id = field.json()["id"]
+
+    foreign_field = await api.post(
+        tenants.b.path("/settings/lead-fields"),
+        headers=tenants.b.owner.auth,
+        json={"label": "Theirs", "field_type": "DROPDOWN"},
+    )
+    foreign_option = await api.post(
+        tenants.b.path(f"/settings/lead-fields/{foreign_field.json()['id']}/options"),
+        headers=tenants.b.owner.auth,
+        json={"label": "Theirs Only"},
+    )
+    assert foreign_option.status_code == 201
+
+    response = await api.patch(
+        tenants.a.path(f"/settings/lead-fields/{field_id}/options/{foreign_option.json()['id']}"),
+        headers=tenants.a.owner.auth,
+        json={"label": "Renamed By An Outsider"},
+    )
+    assert response.status_code == 404

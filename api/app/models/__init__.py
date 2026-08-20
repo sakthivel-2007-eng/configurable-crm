@@ -11,8 +11,36 @@ Tables holding customer data inherit `TenantModel`, which declares
 
 from __future__ import annotations
 
-from app.models.enums import AvailabilityStatus
+from app.models.enums import (
+    ActionDirection,
+    ActionFieldType,
+    AvailabilityStatus,
+    ChangesetSource,
+    IndexedFieldStatus,
+    LeadFieldType,
+    PermissionGrant,
+    StageKind,
+    SystemActionKind,
+    TemplateChannel,
+)
+from app.models.field import (
+    ActionField,
+    ActionFieldOption,
+    CustomActionType,
+    FieldOption,
+    IndexedField,
+    LeadField,
+)
+from app.models.lead import (
+    Action,
+    ActionAttachment,
+    Changeset,
+    Lead,
+    MessageTemplate,
+)
 from app.models.mixins import Base, TenantModel, TimestampMixin
+from app.models.permission import TemplateFieldGrant, TemplateLeadView
+from app.models.pipeline import CallDisposition, LostReason, Stage
 from app.models.user import RefreshToken, User
 from app.models.workspace import (
     AvailabilityLog,
@@ -22,12 +50,37 @@ from app.models.workspace import (
 )
 
 __all__ = [
+    "Action",
+    "ActionAttachment",
+    "ActionDirection",
+    "ActionField",
+    "ActionFieldOption",
+    "ActionFieldType",
     "AvailabilityLog",
     "AvailabilityStatus",
     "Base",
+    "CallDisposition",
+    "Changeset",
+    "ChangesetSource",
+    "CustomActionType",
+    "FieldOption",
+    "IndexedField",
+    "IndexedFieldStatus",
+    "Lead",
+    "LeadField",
+    "LeadFieldType",
+    "LostReason",
     "Membership",
+    "MessageTemplate",
+    "PermissionGrant",
     "PermissionTemplate",
     "RefreshToken",
+    "Stage",
+    "StageKind",
+    "SystemActionKind",
+    "TemplateChannel",
+    "TemplateFieldGrant",
+    "TemplateLeadView",
     "TenantModel",
     "TimestampMixin",
     "User",

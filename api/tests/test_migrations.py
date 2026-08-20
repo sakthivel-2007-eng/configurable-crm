@@ -37,16 +37,24 @@ def _alembic_config() -> Config:
     return config
 
 
+#: One Alembic revision per milestone (CLAUDE.md conventions), oldest first.
+#: Extend as each milestone lands — never edit an applied revision.
+EXPECTED_REVISIONS = [
+    "0001_m1_tenancy",
+    "0002_m2_fields",
+    "0003_m3_pipeline",
+    "0004_m4_permissions",
+    "0005_m5_leads",
+]
+
+
 def test_there_is_exactly_one_revision_per_milestone() -> None:
-    """One Alembic revision per milestone (CLAUDE.md conventions).
-
-    M1 is the first, so the history is a single head with no parent.
-    """
+    """A linear history: one revision per milestone, one head, no branches."""
     script = ScriptDirectory.from_config(_alembic_config())
-    revisions = list(script.walk_revisions())
+    revisions = list(script.walk_revisions())  # newest first
 
-    assert len(revisions) == 1
-    assert revisions[0].down_revision is None
+    assert [r.revision for r in revisions] == list(reversed(EXPECTED_REVISIONS))
+    assert revisions[-1].down_revision is None, "the oldest revision has no parent"
     assert len(script.get_heads()) == 1, "A branched history means two revisions collided"
 
 
@@ -103,7 +111,45 @@ async def test_no_enum_in_the_database_encodes_business_taxonomy(
         )
         enum_names = {row[0] for row in result}
 
-    assert enum_names == {"availability_status"}
+    # Every enum the product legitimately owns, and why it is a *product*
+    # concept rather than a customer's vocabulary. Adding to this list is a
+    # deliberate act; if the name reads like something a customer would say,
+    # it belongs in a table instead.
+    assert enum_names == {
+        "availability_status",  # M1 — whether a member can receive work
+        "lead_field_type",  # M2 — the 13 kinds of data, §1.3
+        "action_field_type",  # M2 — the 8 kinds, §4.3
+        "action_direction",  # M2 — inbound / outbound / information
+        "stage_kind",  # M3 — the 4 structural pipeline kinds, NOT statuses
+        "permission_grant",  # M4 — VIEW / EDIT / IMPORT / EXPORT
+        "system_action_kind",  # M5 — timeline events the product defines
+        "changeset_source",  # M5 — what opened a mutation batch
+        "template_channel",  # M5 — WhatsApp / SMS / Email
+    }
+
+    # And the harder check: no enum *value* anywhere names a business concept.
+    async with schema_engine.connect() as connection:
+        values = await connection.execute(
+            text(
+                "SELECT e.enumlabel FROM pg_enum e "
+                "JOIN pg_type t ON t.oid = e.enumtypid "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "WHERE n.nspname = 'public'"
+            )
+        )
+        labels = {row[0].lower() for row in values}
+
+    forbidden = {
+        "course",
+        "student",
+        "admission",
+        "enquiry",
+        "interview_scheduled",
+        "forge_writing",
+        "mql",
+        "application_status",
+    }
+    assert not (forbidden & labels), f"business taxonomy compiled into an enum: {labels}"
 
 
 async def test_workspace_cascade_removes_its_tenant_rows(

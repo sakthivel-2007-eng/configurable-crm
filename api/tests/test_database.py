@@ -40,21 +40,65 @@ async def test_session_factory_yields_a_working_session(engine: AsyncEngine) -> 
     assert value == 42
 
 
-def test_m1_defines_exactly_its_own_tables() -> None:
-    """M1 owns six tables and no more.
+#: Tables each milestone is allowed to define. A table appearing before its
+#: milestone is the "building ahead" failure mode CLAUDE.md warns about — and
+#: if it is a taxonomy table, the worse one. Extend this deliberately, one
+#: milestone at a time; never to make a red test green.
+M1_TABLES = {
+    "users",
+    "refresh_tokens",
+    "workspaces",
+    "permission_templates",
+    "memberships",
+    "availability_log",
+}
 
-    A table appearing here early is the "building ahead" failure mode CLAUDE.md
-    warns about — and if it is a taxonomy table, the worse one. Each milestone
-    extends this set deliberately.
+M2_TABLES = {
+    "lead_fields",
+    "field_options",
+    # `custom_action_types` lands with M2 because `action_fields` holds a
+    # foreign key to it; M3 adds its behaviour, not its table.
+    "custom_action_types",
+    "action_fields",
+    "action_field_options",
+    "indexed_fields",
+}
+
+
+M3_TABLES = {
+    "stages",
+    "lost_reasons",
+    "call_dispositions",
+}
+
+M4_TABLES = {
+    "template_field_grants",
+    "template_lead_views",
+}
+
+M5_TABLES = {
+    "leads",
+    "actions",
+    "action_attachments",
+    "changesets",
+    "message_templates",
+}
+
+
+def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
+    """No table exists before the milestone that owns it."""
+    assert set(Base.metadata.tables) == (M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES)
+
+
+def test_no_table_name_encodes_a_business_concept() -> None:
+    """Tables are product concepts. A customer's taxonomy lives in rows.
+
+    A `courses` or `applications` table would mean the schema had learned
+    something about one customer's business.
     """
-    assert set(Base.metadata.tables) == {
-        "users",
-        "refresh_tokens",
-        "workspaces",
-        "permission_templates",
-        "memberships",
-        "availability_log",
-    }
+    forbidden = {"course", "student", "application", "product", "enquiry", "admission"}
+    for name in Base.metadata.tables:
+        assert not (forbidden & set(name.split("_"))), f"{name} names a business concept"
 
 
 def test_every_tenant_table_carries_workspace_id() -> None:

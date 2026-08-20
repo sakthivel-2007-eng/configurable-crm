@@ -22,7 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 
-__all__ = ["Base", "TenantModel", "TimestampMixin"]
+__all__ = ["Base", "TenantModel", "TenantScoped", "TimestampMixin"]
 
 
 class TimestampMixin:
@@ -41,7 +41,32 @@ class TimestampMixin:
     )
 
 
-class TenantModel(Base, TimestampMixin):
+class TenantScoped(Base):
+    """Anything that carries `workspace_id`, whatever its primary key.
+
+    Split out from `TenantModel` because a handful of tables are legitimately
+    keyed on something other than a surrogate id — `template_field_grants` is
+    `PRIMARY KEY (template_id, field_id, grant)` per docs/01-data-model.md §3.5,
+    since the row *is* the fact.
+
+    The split matters for isolation, not tidiness: `ScopedSession`'s loader
+    criteria targets **this** class, so a composite-keyed tenant table is
+    auto-filtered exactly like every other one. Before the split it would have
+    fallen outside the criteria and relied on each query remembering its own
+    `WHERE workspace_id` — the discipline this architecture exists to remove.
+    """
+
+    __abstract__ = True
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+
+class TenantModel(TenantScoped, TimestampMixin):
     """Base for every table that holds tenant data.
 
     Guarantees `workspace_id` at the schema level. Subclasses should still
@@ -56,10 +81,4 @@ class TenantModel(Base, TimestampMixin):
         UUID(as_uuid=True),
         primary_key=True,
         server_default=func.gen_random_uuid(),
-    )
-    workspace_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
     )

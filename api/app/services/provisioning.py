@@ -30,7 +30,22 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Membership, PermissionTemplate, User, Workspace
+from app.fields.values import slugify_key
+from app.models import (
+    CallDisposition,
+    LeadField,
+    LostReason,
+    Membership,
+    PermissionTemplate,
+    Stage,
+    StageKind,
+    User,
+    Workspace,
+)
+from app.models.enums import PermissionGrant
+from app.models.permission import TemplateFieldGrant
+from app.services.fields import BUILTIN_FIELDS
+from app.tenancy.features import DEFAULT_ENABLED
 
 __all__ = [
     "EXPECTED_STEPS",
@@ -57,6 +72,8 @@ _MARKETING = "Marketing"
 _ROOT_CAPS: dict[str, Any] = {
     "leads": {
         "admin_access": True,
+        "add_or_update": True,
+        "create_from_whatsapp_and_calls": True,
         "manually_add_lead": True,
         "bulk_edit": True,
         "actions": True,
@@ -69,6 +86,8 @@ _ROOT_CAPS: dict[str, Any] = {
 _ADMIN_CAPS: dict[str, Any] = {
     "leads": {
         "admin_access": True,
+        "add_or_update": True,
+        "create_from_whatsapp_and_calls": True,
         "manually_add_lead": True,
         "bulk_edit": True,
         "actions": True,
@@ -81,32 +100,75 @@ _ADMIN_CAPS: dict[str, Any] = {
 _MANAGER_CAPS: dict[str, Any] = {
     "leads": {
         "admin_access": False,
+        "add_or_update": True,
+        "create_from_whatsapp_and_calls": True,
         "manually_add_lead": True,
         "bulk_edit": True,
         "actions": True,
         "merge_leads": True,
         "search": True,
     },
-    "team": {"admin_access": False},
+    "team": {
+        "view_members": True,
+        "manage_availability": True,
+    },
+    "reports": {"view_reports": True, "view_team_reports": True, "view_leaderboard": True},
+    "tasks": {
+        "view_tasks": True,
+        "create_tasks": True,
+        "complete_tasks": True,
+        "assign_tasks": True,
+    },
+    "calling": {"log_calls": True, "view_call_history": True},
+    "view": {
+        "lead": {"show_timeline": True, "show_tasks": True, "show_score": True},
+        "dashboard": {"show_personal_dashboard": True, "show_team_dashboard": True},
+        "leads_table": {
+            "show_all_leads": True,
+            "show_saved_filters": True,
+            "show_column_picker": True,
+        },
+    },
 }
 _CALLER_CAPS: dict[str, Any] = {
     "leads": {
         "admin_access": False,
+        # A telecaller's core job is working leads, so `add_or_update` is on.
+        # It was absent from the M1 defaults only because the capability was
+        # not yet named — M4 spec'd the group, M5 exposed the gap.
+        "add_or_update": True,
+        "create_from_whatsapp_and_calls": True,
         "manually_add_lead": True,
         "bulk_edit": False,
         "actions": True,
         "merge_leads": False,
         "search": True,
     },
+    "calling": {"log_calls": True, "view_call_history": True},
+    "tasks": {"view_tasks": True, "create_tasks": True, "complete_tasks": True},
+    "view": {
+        "lead": {"show_timeline": True, "show_tasks": True},
+        "dashboard": {"show_personal_dashboard": True},
+        "leads_table": {"show_saved_filters": True},
+    },
 }
 _MARKETING_CAPS: dict[str, Any] = {
     "leads": {
         "admin_access": False,
+        # Marketing creates and enriches leads but does not work them, so it
+        # gets `add_or_update` without `actions`.
+        "add_or_update": True,
+        "create_from_whatsapp_and_calls": False,
         "manually_add_lead": True,
         "bulk_edit": False,
         "actions": False,
         "merge_leads": False,
         "search": True,
+    },
+    "reports": {"view_reports": True},
+    "view": {
+        "dashboard": {"show_personal_dashboard": True},
+        "leads_table": {"show_saved_filters": True},
     },
 }
 
@@ -128,6 +190,7 @@ EXPECTED_STEPS: frozenset[str] = frozenset(
         "lead_fields",  # M2 — 4 built-ins, plus identity and H1/H2 pointers
         "stages",  # M3 — 1 initial, 1 active, 1 won, 1 lost
         "lost_reasons",  # M3 — 5 defaults, one of them the fallback
+        "field_grants",  # M4 - the default matrix over the built-in fields
         "call_dispositions",  # M3 — the 7 system entries, one default
     }
 )
@@ -205,6 +268,184 @@ provisioning_registry.register(
 )
 
 
+async def _provision_lead_fields(session: AsyncSession, workspace: Workspace) -> None:
+    """The four built-in lead fields, plus the identity and H1/H2 pointers.
+
+    docs/01-data-model.md §7: Name (TEXT), Phone (PHONE), Email (EMAIL),
+    Alternate Phone (PHONE); `identity_field_id` to Phone, H1 to Name, H2 to
+    Phone.
+
+    Deliberately the *only* fields a new workspace gets. No source, no status,
+    no product — a new customer sees an empty, working CRM and builds their own
+    schema. Seeding a taxonomy here is the #1 mistake CLAUDE.md names.
+    """
+    created: dict[str, LeadField] = {}
+    for order, (label, field_type) in enumerate(BUILTIN_FIELDS):
+        field = LeadField(
+            workspace_id=workspace.id,
+            key=slugify_key(label, taken=set(created)),
+            label=label,
+            field_type=field_type,
+            is_builtin=True,
+            sort_order=order,
+            # A built-in is offered everywhere by default: these four are what
+            # a quick-add form is for.
+            show_in_import=True,
+            show_in_quick_add=True,
+        )
+        session.add(field)
+        created[field.key] = field
+
+    await session.flush()
+
+    workspace.identity_field_id = created["phone"].id
+    workspace.primary_field_1_id = created["name"].id
+    workspace.primary_field_2_id = created["phone"].id
+    await session.flush()
+
+
+provisioning_registry.register(ProvisioningStep(name="lead_fields", run=_provision_lead_fields))
+
+#: docs/01-data-model.md §7. Deliberately structural: a starting point, one
+#: step, and the two ways a deal ends. Every label here is expected to be
+#: renamed by the customer on day one — they exist so the pipeline is usable
+#: before it is configured, not as a suggested process.
+_DEFAULT_STAGES: tuple[tuple[str, StageKind], ...] = (
+    ("New", StageKind.INITIAL),
+    ("Contacted", StageKind.ACTIVE),
+    ("Won", StageKind.WON),
+    ("Lost", StageKind.LOST),
+)
+
+#: §7. Generic commercial outcomes, not an industry's reasons. "Unknown" is the
+#: default so a lead can always be marked lost without forcing a guess.
+_DEFAULT_LOST_REASONS: tuple[tuple[str, bool], ...] = (
+    ("Not interested", False),
+    ("Budget", False),
+    ("Competitor", False),
+    ("No response", False),
+    ("Unknown", True),
+)
+
+#: §7 and §3 — the 7 system dispositions, "Connected" default. These describe
+#: what happened to a *phone call*, which is product vocabulary rather than a
+#: customer's. They are `is_system`: archivable, never editable.
+_SYSTEM_DISPOSITIONS: tuple[tuple[str, bool], ...] = (
+    ("Connected", True),
+    ("Number Busy", False),
+    ("No Answer", False),
+    ("Switched Off", False),
+    ("Wrong Number", False),
+    ("Call Later", False),
+    ("Redialed", False),
+)
+
+
+async def _provision_stages(session: AsyncSession, workspace: Workspace) -> None:
+    """One INITIAL, one ACTIVE, one WON, one LOST."""
+    session.add_all(
+        [
+            Stage(workspace_id=workspace.id, kind=kind, label=label, sort_order=order)
+            for order, (label, kind) in enumerate(_DEFAULT_STAGES)
+        ]
+    )
+    await session.flush()
+
+
+async def _provision_lost_reasons(session: AsyncSession, workspace: Workspace) -> None:
+    session.add_all(
+        [
+            LostReason(
+                workspace_id=workspace.id,
+                label=label,
+                is_default=is_default,
+                sort_order=order,
+            )
+            for order, (label, is_default) in enumerate(_DEFAULT_LOST_REASONS)
+        ]
+    )
+    await session.flush()
+
+
+async def _provision_call_dispositions(session: AsyncSession, workspace: Workspace) -> None:
+    session.add_all(
+        [
+            CallDisposition(
+                workspace_id=workspace.id,
+                label=label,
+                is_default=is_default,
+                is_system=True,
+                sort_order=order,
+            )
+            for order, (label, is_default) in enumerate(_SYSTEM_DISPOSITIONS)
+        ]
+    )
+    await session.flush()
+
+
+provisioning_registry.register(ProvisioningStep(name="stages", run=_provision_stages))
+provisioning_registry.register(ProvisioningStep(name="lost_reasons", run=_provision_lost_reasons))
+provisioning_registry.register(
+    ProvisioningStep(name="call_dispositions", run=_provision_call_dispositions)
+)
+
+
+#: Which grants each default template gets on the four built-in fields. Export
+#: is deliberately absent from every non-admin template: the observed default is
+#: `Export (0) None`, a data-exfiltration control worth matching.
+_DEFAULT_TEMPLATE_GRANTS: dict[str, tuple[PermissionGrant, ...]] = {
+    ROOT_TEMPLATE_NAME: (
+        PermissionGrant.VIEW,
+        PermissionGrant.EDIT,
+        PermissionGrant.IMPORT,
+        PermissionGrant.EXPORT,
+    ),
+    _ADMIN: (
+        PermissionGrant.VIEW,
+        PermissionGrant.EDIT,
+        PermissionGrant.IMPORT,
+        PermissionGrant.EXPORT,
+    ),
+    _MANAGER: (PermissionGrant.VIEW, PermissionGrant.EDIT, PermissionGrant.IMPORT),
+    _CALLER: (PermissionGrant.VIEW, PermissionGrant.EDIT),
+    _MARKETING: (PermissionGrant.VIEW, PermissionGrant.IMPORT),
+}
+
+
+async def _provision_field_grants(session: AsyncSession, workspace: Workspace) -> None:
+    """Seed the field matrix for the five default templates.
+
+    Runs last: it needs both `permission_templates` and `lead_fields` to exist.
+    A workspace whose templates granted nothing would be one where nobody but an
+    admin could read a lead, which is not a useful starting point — but nor is
+    granting everything, so each template gets the narrowest set that makes its
+    name true.
+    """
+    templates = await session.execute(
+        select(PermissionTemplate).where(PermissionTemplate.workspace_id == workspace.id)
+    )
+    fields = await session.execute(select(LeadField).where(LeadField.workspace_id == workspace.id))
+    field_ids = [f.id for f in fields.scalars().all()]
+
+    session.add_all(
+        [
+            TemplateFieldGrant(
+                workspace_id=workspace.id,
+                template_id=template.id,
+                field_id=field_id,
+                grant=grant,
+            )
+            for template in templates.scalars().all()
+            for grant in _DEFAULT_TEMPLATE_GRANTS.get(template.name, ())
+            for field_id in field_ids
+        ]
+    )
+    await session.flush()
+
+
+provisioning_registry.register(ProvisioningStep(name="field_grants", run=_provision_field_grants))
+
+
 class WorkspaceProvisioner:
     """Creates a workspace and everything §7 says comes with it."""
 
@@ -235,6 +476,10 @@ class WorkspaceProvisioner:
             timezone=timezone,
             currency=currency,
             seat_limit=seat_limit,
+            # §5 feature flags. A workspace opts into a module rather than
+            # opting out of six, so only the two that a CRM is unusable
+            # without start on.
+            features=dict.fromkeys(sorted(DEFAULT_ENABLED), True),
         )
         self._session.add(workspace)
         await self._session.flush()

@@ -21,11 +21,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import ORMExecuteState, with_loader_criteria
 from sqlalchemy.sql import Executable
 
-from app.models.mixins import Base, TenantModel
+from app.models.mixins import Base, TenantModel, TenantScoped
 
 __all__ = ["ScopedSession", "WorkspaceMismatchError"]
 
-TenantT = TypeVar("TenantT", bound=TenantModel)
+#: Anything carrying `workspace_id` — including composite-keyed tables.
+TenantT = TypeVar("TenantT", bound=TenantScoped)
+#: Surrogate-keyed tenant tables. `get()` needs `.id`, which a
+#: composite-keyed row does not have, so by-id lookup is narrower than
+#: select/add by design.
+KeyedT = TypeVar("KeyedT", bound=TenantModel)
 
 # Key under which the active workspace is stashed on the SQLAlchemy session's
 # `info` dict, where the ORM execute listener below can find it.
@@ -45,6 +50,9 @@ class WorkspaceMismatchError(RuntimeError):
 def _apply_workspace_criteria(state: ORMExecuteState) -> None:
     """Force `workspace_id = :scope` onto every tenant entity in every query.
 
+    Targets `TenantScoped` rather than `TenantModel` so composite-keyed tenant
+    tables (`template_field_grants`) are covered too.
+
     Applies to relationship loads and lazy loads too, which is the part a
     hand-written `WHERE` clause always misses. Sessions with no scope in their
     `info` (the auth/global path) are left alone — they may only touch
@@ -56,7 +64,7 @@ def _apply_workspace_criteria(state: ORMExecuteState) -> None:
 
     state.statement = state.statement.options(
         with_loader_criteria(
-            TenantModel,
+            TenantScoped,
             lambda cls: cls.workspace_id == workspace_id,
             include_aliases=True,
         )
@@ -90,7 +98,7 @@ class ScopedSession:
         """
         return select(model).where(model.workspace_id == self._workspace_id)
 
-    async def get(self, model: type[TenantT], entity_id: uuid.UUID) -> TenantT | None:
+    async def get(self, model: type[KeyedT], entity_id: uuid.UUID) -> KeyedT | None:
         """Fetch by id *within this workspace*.
 
         Returns `None` for another workspace's id exactly as it does for one
@@ -136,7 +144,7 @@ class ScopedSession:
 
     # --- writes ------------------------------------------------------------
 
-    def add(self, instance: TenantModel) -> None:
+    def add(self, instance: TenantScoped) -> None:
         """Stage an insert, stamping the workspace.
 
         An instance arriving with a *different* workspace already set is a
@@ -152,7 +160,7 @@ class ScopedSession:
         instance.workspace_id = self._workspace_id
         self._session.add(instance)
 
-    def add_all(self, instances: Sequence[TenantModel]) -> None:
+    def add_all(self, instances: Sequence[TenantScoped]) -> None:
         for instance in instances:
             self.add(instance)
 
@@ -165,7 +173,7 @@ class ScopedSession:
         without a workspace, and refusing loudly is what keeps it from becoming
         one.
         """
-        if isinstance(instance, TenantModel):
+        if isinstance(instance, TenantScoped):
             raise WorkspaceMismatchError(
                 f"{type(instance).__name__} is tenant data; use add() so it is "
                 f"stamped with workspace {self._workspace_id}"

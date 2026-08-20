@@ -1,0 +1,311 @@
+"""The action-writing service (M5).
+
+PROMPTS.md M5: "Write the action-writing service and its tests FIRST, before any
+endpoint." This is why — every lead mutation in the product funnels through
+here, and the guarantees it makes are the ones M7's undo and M6's history
+filters are built on:
+
+1. **Every mutation opens a changeset** (architecture rule 5a). Single edit,
+   bulk edit, import, distribution, intake — all of them. Every action produced
+   carries the `changeset_id`.
+2. **Every mutation writes its actions in the same transaction as the change**
+   (rule 5). The timeline is the audit trail; a timeline that can diverge from
+   the data is not one.
+3. **`STAGE_CHANGE` and `ASSIGNMENT_CHANGE` carry old and new ids** (rule 5b),
+   because M6's transition filters query them through expression indexes.
+4. **`score_applied` is snapshotted**, so editing a custom action type's score
+   later does not rewrite history.
+
+Nothing here commits. The caller owns the transaction boundary, which is what
+lets a lead update and its four actions land atomically.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import uuid
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from sqlalchemy import func, select
+
+from app.errors import api_error
+from app.models.enums import ChangesetSource, SystemActionKind
+from app.models.field import CustomActionType
+from app.models.lead import Action, Changeset, Lead
+from app.tenancy.session import ScopedSession
+
+__all__ = ["ActionWriter", "FieldDelta"]
+
+
+class FieldDelta:
+    """One field's before and after, as a `FIELD_CHANGE` payload.
+
+    A tiny value type rather than a tuple, because the payload shape is part of
+    the contract M7's undo reads: `{field_key, label, old, new}`.
+    """
+
+    __slots__ = ("field_key", "label", "new", "old")
+
+    def __init__(self, field_key: str, label: str, old: Any, new: Any) -> None:
+        self.field_key = field_key
+        self.label = label
+        self.old = old
+        self.new = new
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "field_key": self.field_key,
+            "label": self.label,
+            "old": self.old,
+            "new": self.new,
+        }
+
+
+class ActionWriter:
+    """Opens changesets and appends actions.
+
+    One instance per request. `open_changeset` is called once per mutation
+    batch; every `record_*` after it stamps that changeset onto the action.
+    """
+
+    def __init__(self, session: ScopedSession, *, actor_id: uuid.UUID | None) -> None:
+        self._session = session
+        self._actor_id = actor_id
+        self._changeset: Changeset | None = None
+
+    # --- changesets --------------------------------------------------------
+
+    async def open_changeset(
+        self, *, source: ChangesetSource, summary: str, lead_count: int = 1
+    ) -> Changeset:
+        """Start a batch. Every action written afterwards belongs to it.
+
+        Deliberately explicit rather than implicit-on-first-write: the summary
+        ("Set Stage on 312 leads") is knowable at the start and not at the end,
+        and the edit report is unreadable without it.
+        """
+        changeset = Changeset(
+            source=source,
+            actor_id=self._actor_id,
+            summary=summary,
+            lead_count=lead_count,
+        )
+        self._session.add(changeset)
+        await self._session.flush()
+        self._changeset = changeset
+        return changeset
+
+    @property
+    def changeset(self) -> Changeset:
+        if self._changeset is None:  # pragma: no cover — a programming error
+            raise RuntimeError(
+                "No changeset is open. Every mutation opens one before writing "
+                "actions (architecture rule 5a) — otherwise it cannot be undone."
+            )
+        return self._changeset
+
+    # --- writing actions ---------------------------------------------------
+
+    def _append(
+        self,
+        lead: Lead,
+        *,
+        kind: SystemActionKind,
+        payload: Mapping[str, Any] | None = None,
+        body: str | None = None,
+        action_type_id: uuid.UUID | None = None,
+        score_applied: int = 0,
+        performed_at: dt.datetime | None = None,
+    ) -> Action:
+        action = Action(
+            lead_id=lead.id,
+            changeset_id=self.changeset.id,
+            kind=kind,
+            action_type_id=action_type_id,
+            actor_id=self._actor_id,
+            payload=dict(payload or {}),
+            body=body,
+            score_applied=score_applied,
+            performed_at=performed_at or dt.datetime.now(dt.UTC),
+        )
+        self._session.add(action)
+
+        # Keep the denormalised rollups on the lead in step, in the same
+        # transaction. A `last_action_at` that lags its timeline would make the
+        # "no contact in 14 days" filter wrong.
+        if score_applied:
+            lead.score = (lead.score or 0) + score_applied
+        if action.performed_at and (
+            lead.last_action_at is None or action.performed_at > lead.last_action_at
+        ):
+            lead.last_action_at = action.performed_at
+        return action
+
+    def record_created(self, lead: Lead) -> Action:
+        return self._append(lead, kind=SystemActionKind.LEAD_CREATED)
+
+    def record_field_changes(self, lead: Lead, deltas: Sequence[FieldDelta]) -> list[Action]:
+        """One `FIELD_CHANGE` per changed field, all sharing one changeset.
+
+        Per-field rather than one action listing everything, because the
+        timeline is read per field ("when did the budget change?") and undo
+        reverses per field.
+        """
+        return [
+            self._append(lead, kind=SystemActionKind.FIELD_CHANGE, payload=delta.as_payload())
+            for delta in deltas
+        ]
+
+    def record_stage_change(
+        self,
+        lead: Lead,
+        *,
+        old_stage_id: uuid.UUID | None,
+        new_stage_id: uuid.UUID | None,
+        lost_reason_id: uuid.UUID | None = None,
+    ) -> Action:
+        """Old and new ids in the payload (rule 5b).
+
+        M6's "status went from HOT to Lost last week" filter reads exactly these
+        two keys through `actions_status_change_idx`. Storing only the new value
+        would make that filter impossible without a self-join over the timeline.
+        """
+        return self._append(
+            lead,
+            kind=SystemActionKind.STAGE_CHANGE,
+            payload={
+                "old_stage_id": str(old_stage_id) if old_stage_id else None,
+                "new_stage_id": str(new_stage_id) if new_stage_id else None,
+                "lost_reason_id": str(lost_reason_id) if lost_reason_id else None,
+            },
+        )
+
+    def record_assignment_change(
+        self,
+        lead: Lead,
+        *,
+        old_assignee_id: uuid.UUID | None,
+        new_assignee_id: uuid.UUID | None,
+    ) -> Action:
+        """Old and new ids again — "moved off Priya this month" needs both."""
+        return self._append(
+            lead,
+            kind=SystemActionKind.ASSIGNMENT_CHANGE,
+            payload={
+                "old_assignee_id": str(old_assignee_id) if old_assignee_id else None,
+                "new_assignee_id": str(new_assignee_id) if new_assignee_id else None,
+            },
+        )
+
+    def record_rating_change(
+        self, lead: Lead, *, old_rating: int | None, new_rating: int | None
+    ) -> Action:
+        return self._append(
+            lead,
+            kind=SystemActionKind.RATING_CHANGE,
+            payload={"old": old_rating, "new": new_rating},
+        )
+
+    def record_note(self, lead: Lead, *, body: str) -> Action:
+        return self._append(lead, kind=SystemActionKind.NOTE, body=body)
+
+    def record_call(
+        self,
+        lead: Lead,
+        *,
+        direction: str,
+        disposition_id: uuid.UUID,
+        duration_seconds: int,
+        notes: str | None = None,
+    ) -> Action:
+        """A manually logged call.
+
+        There is no telephony in v1 (CLAUDE.md): this records what a human says
+        happened. Nothing here implies a provider, and there is deliberately no
+        provider interface to "fill in later".
+        """
+        return self._append(
+            lead,
+            kind=SystemActionKind.CALL_LOGGED,
+            payload={
+                "direction": direction,
+                "disposition_id": str(disposition_id),
+                "duration_seconds": duration_seconds,
+                "notes": notes,
+            },
+            body=notes,
+        )
+
+    def record_message(
+        self, lead: Lead, *, kind: SystemActionKind, body: str, template_id: uuid.UUID | None
+    ) -> Action:
+        """A WhatsApp/SMS/email send.
+
+        WhatsApp is a client-side `wa.me` deep link followed by this action, so
+        nothing in the payload may imply delivery — only that the operator was
+        handed a composed message.
+        """
+        return self._append(
+            lead,
+            kind=kind,
+            body=body,
+            payload={
+                "template_id": str(template_id) if template_id else None,
+                # Explicit, so no reader mistakes this for a delivery receipt.
+                "delivery_confirmed": False,
+            },
+        )
+
+    async def record_custom(
+        self,
+        lead: Lead,
+        *,
+        action_type: CustomActionType,
+        values: Mapping[str, Any],
+        performed_at: dt.datetime | None = None,
+    ) -> Action:
+        """A custom action, with its score snapshotted.
+
+        Predated timestamps are refused unless the type allows them (§4.2) —
+        otherwise a rep could quietly backdate activity into a closed reporting
+        period.
+        """
+        now = dt.datetime.now(dt.UTC)
+        if performed_at is not None and performed_at < now - dt.timedelta(minutes=1):
+            if not action_type.allow_predated:
+                raise api_error(
+                    422,
+                    "predated_not_allowed",
+                    f"{action_type.name} cannot be logged with a past timestamp",
+                )
+            if performed_at > now:
+                raise api_error(422, "future_action", "An action cannot be logged in the future")
+
+        return self._append(
+            lead,
+            kind=SystemActionKind.CUSTOM,
+            action_type_id=action_type.id,
+            payload=dict(values),
+            # Snapshot: editing the type's score later must not rewrite this.
+            score_applied=action_type.score,
+            performed_at=performed_at,
+        )
+
+    # --- reads -------------------------------------------------------------
+
+    async def recompute_score(self, lead: Lead) -> int:
+        """Re-derive a lead's score from its timeline.
+
+        The rollup on `leads.score` is maintained incrementally; this is the
+        authority it is checked against, and what a repair job would use.
+        """
+        result = await self._session.execute(
+            select(func.coalesce(func.sum(Action.score_applied), 0)).where(
+                Action.lead_id == lead.id,
+                Action.workspace_id == self._session.workspace_id,
+            )
+        )
+        total = int(result.scalar_one())
+        lead.score = total
+        return total

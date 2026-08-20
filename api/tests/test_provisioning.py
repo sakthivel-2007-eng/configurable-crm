@@ -120,12 +120,11 @@ def test_the_provisioning_registry_matches_the_spec() -> None:
     """
     assert provisioning_registry.registered_names <= EXPECTED_STEPS
     assert "permission_templates" in provisioning_registry.registered_names
-    assert provisioning_registry.outstanding_names == {
-        "lead_fields",  # M2
-        "stages",  # M3
-        "lost_reasons",  # M3
-        "call_dispositions",  # M3
-    }
+    # M3 closed the last three. Every item docs/01-data-model.md §7 names is
+    # now provisioned, so this set is empty — and must stay empty unless the
+    # spec itself grows.
+    assert provisioning_registry.outstanding_names == frozenset()
+    assert provisioning_registry.registered_names == EXPECTED_STEPS
 
 
 def test_the_registry_refuses_a_step_the_spec_does_not_name() -> None:
@@ -192,9 +191,10 @@ async def test_create_workspace_endpoint_provisions_and_defaults_locale(
     assert body["default_country_code"] == "1"
     assert body["seat_limit"] == 10
     assert body["seats_used"] == 1
-    # M2 populates these; they must be null, not guessed at.
-    assert body["identity_field_id"] is None
-    assert body["primary_field_1_id"] is None
+    # M2 provisions the four built-in fields and points the workspace at them:
+    # Phone identifies a lead, Name and Phone are the H1/H2 headline fields.
+    assert body["identity_field_id"] is not None
+    assert body["primary_field_1_id"] is not None
 
 
 async def test_create_workspace_rejects_an_unknown_timezone(

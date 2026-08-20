@@ -28,7 +28,14 @@ from sqlalchemy.orm import selectinload
 from app.auth.deps import CurrentUser, get_current_user
 from app.dependencies import get_session
 from app.errors import forbidden, not_found
-from app.models import Membership, PermissionTemplate, Workspace
+from app.models import LeadField, Membership, PermissionTemplate, Workspace
+from app.permissions.capabilities import Capabilities
+from app.permissions.projection import (
+    FieldGrants,
+    FieldProjectionService,
+    FieldWriteFilter,
+    load_grants,
+)
 from app.tenancy.session import ScopedSession
 
 __all__ = [
@@ -39,7 +46,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class WorkspaceScope:
     """Everything a handler needs to know about who is asking and where.
 
@@ -56,6 +63,13 @@ class WorkspaceScope:
     # if their template grants admin access.
     visible_membership_ids: frozenset[uuid.UUID]
     sees_all_members: bool
+    #: Validated view of `template.capabilities`. Parsed once here rather than
+    #: on every `capability()` call.
+    capabilities: Capabilities
+    #: Per-request cache for the field matrix; see `field_grants`. Not frozen,
+    #: which is why this dataclass is mutable — the alternative is threading a
+    #: separate cache object through every dependency.
+    _grants_cache: FieldGrants | None = None
 
     @property
     def workspace_id(self) -> uuid.UUID:
@@ -68,13 +82,38 @@ class WorkspaceScope:
     def capability(self, group: str, name: str) -> bool:
         """Read one capability flag out of the template.
 
-        Absent means denied. M4 replaces the raw dict access with a validated
-        capability model; the call sites do not change.
+        Absent means denied. Goes through the validated `Capabilities` model
+        (M4) rather than raw dict access, so a malformed blob denies rather
+        than raising.
         """
-        group_caps = self.template.capabilities.get(group)
-        if not isinstance(group_caps, dict):
-            return False
-        return bool(group_caps.get(name, False))
+        return self.capabilities.allows(group, name)
+
+    async def field_grants(self) -> FieldGrants:
+        """This caller's resolved field matrix, computed once per request.
+
+        PROMPTS.md M4: "Cache resolved permissions per request." A 100-row list
+        page would otherwise re-derive the same matrix 100 times.
+
+        Cached on the scope object, which lives exactly as long as the request.
+        """
+        if self._grants_cache is None:
+            rows = await self.session.execute(self.session.select(LeadField))
+            keys = {f.id: f.key for f in rows.scalars().all()}
+            self._grants_cache = await load_grants(
+                self.session,
+                template_id=self.template.id,
+                is_admin=self.is_workspace_admin,
+                all_field_keys=keys,
+            )
+        return self._grants_cache
+
+    async def projection(self) -> FieldProjectionService:
+        """The read chokepoint, bound to this caller's grants."""
+        return FieldProjectionService(await self.field_grants())
+
+    async def write_filter(self) -> FieldWriteFilter:
+        """The write chokepoint, bound to this caller's grants."""
+        return FieldWriteFilter(await self.field_grants())
 
     @property
     def is_workspace_admin(self) -> bool:
@@ -167,6 +206,7 @@ async def require_workspace(
         scope_ids = frozenset(all_ids.scalars().all())
 
     yield WorkspaceScope(
+        capabilities=Capabilities.from_stored(template.capabilities),
         workspace=membership.workspace,
         membership=membership,
         template=template,
@@ -192,8 +232,10 @@ async def require_workspace_admin(
 
 
 def _grants_admin_access(capabilities: dict[str, Any]) -> bool:
-    for group in ("leads", "permissions"):
-        group_caps = capabilities.get(group)
-        if isinstance(group_caps, dict) and group_caps.get("admin_access"):
-            return True
-    return False
+    """Whether a template holds admin access anywhere that implies seeing all.
+
+    Reads through the validated model so a malformed blob denies rather than
+    raising during login.
+    """
+    parsed = Capabilities.from_stored(capabilities)
+    return parsed.leads.admin_access or parsed.permissions.admin_access

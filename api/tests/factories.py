@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.passwords import PasswordHasherService
-from app.models import Membership, PermissionTemplate, User, Workspace
+from app.models import LeadField, Membership, PermissionTemplate, User, Workspace
 from app.services.provisioning import WorkspaceProvisioner
 
 __all__ = ["Actor", "WorkspaceFixture", "build_workspace", "login"]
@@ -49,10 +49,18 @@ class WorkspaceFixture:
     owner: Actor
     templates: dict[str, PermissionTemplate]
     members: dict[str, Actor] = field(default_factory=dict)
+    #: The four built-in lead fields M2 provisions, by key. Gives the isolation
+    #: suite a real, always-present tenant resource to aim a probe at.
+    fields: dict[str, LeadField] = field(default_factory=dict)
 
     @property
     def id(self) -> uuid.UUID:
         return self.workspace.id
+
+    @property
+    def builtin_field_id(self) -> uuid.UUID:
+        """A field that exists in every workspace, for cross-tenant probes."""
+        return self.fields["phone"].id
 
     def path(self, suffix: str = "") -> str:
         return f"/api/v1/workspaces/{self.workspace.id}{suffix}"
@@ -80,12 +88,20 @@ async def build_workspace(
 
     templates = await _templates(session, workspace.id)
     membership = await _reload_membership(session, membership.id)
+    fields = await _lead_fields(session, workspace.id)
 
     return WorkspaceFixture(
         workspace=workspace,
         owner=Actor(user=owner_user, membership=membership),
         templates=templates,
+        fields=fields,
     )
+
+
+async def _lead_fields(session: AsyncSession, workspace_id: uuid.UUID) -> dict[str, LeadField]:
+    """The workspace's lead fields, keyed by their derived JSONB key."""
+    rows = await session.execute(select(LeadField).where(LeadField.workspace_id == workspace_id))
+    return {f.key: f for f in rows.scalars().all()}
 
 
 async def add_member(

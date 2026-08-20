@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, status
 
 from app.fields.registry import action_type_payloads, lead_type_payloads
 from app.models.enums import LeadFieldType
@@ -35,6 +35,7 @@ from app.schemas.field import (
 )
 from app.services.fields import FieldService
 from app.tenancy.scoping import WorkspaceScope, require_workspace, require_workspace_admin
+from app.workers.indexing import remove_declared_index, run_declared_index_build
 
 # Mounted under the tenant prefix in `main`, matching every other tenant
 # router — the workspace segment is applied there, not repeated here.
@@ -338,6 +339,8 @@ async def list_indexed_fields(
 )
 async def declare_indexed_field(
     payload: IndexedFieldCreate,
+    request: Request,
+    background: BackgroundTasks,
     scope: Annotated[WorkspaceScope, Depends(require_workspace_admin)],
     service: Annotated[FieldService, Depends(_admin_service)],
 ) -> IndexedFieldRead:
@@ -347,7 +350,22 @@ async def declare_indexed_field(
     the worker builds it and flips the status.
     """
     entry = await service.declare_indexed(payload.field_id)
+    field = await service.get_field(payload.field_id)
     await scope.session.commit()
+
+    # Scheduled after the commit, so the worker cannot look for a declaration
+    # this request has not written yet. A `BackgroundTasks` job rather than an
+    # `arq` enqueue: there is no worker process yet, and M8 brings one up for
+    # the scheduler — at which point this call site swaps for an enqueue and
+    # nothing else changes.
+    background.add_task(
+        run_declared_index_build,
+        request.app.state.engine,
+        request.app.state.session_factory,
+        workspace_id=scope.workspace.id,
+        field_id=payload.field_id,
+        field_key=field.key,
+    )
     return IndexedFieldRead.model_validate(entry)
 
 
@@ -358,6 +376,8 @@ async def declare_indexed_field(
 )
 async def undeclare_indexed_field(
     field_id: uuid.UUID,
+    request: Request,
+    background: BackgroundTasks,
     scope: Annotated[WorkspaceScope, Depends(require_workspace_admin)],
     service: Annotated[FieldService, Depends(_admin_service)],
 ) -> dict[str, str]:
@@ -365,4 +385,11 @@ async def undeclare_indexed_field(
     # concurrently, for the same reason it was built there.
     name = await service.undeclare_indexed(field_id)
     await scope.session.commit()
+
+    background.add_task(
+        remove_declared_index,
+        request.app.state.engine,
+        workspace_id=scope.workspace.id,
+        field_id=field_id,
+    )
     return {"index_name": name, "status": "DROPPING"}

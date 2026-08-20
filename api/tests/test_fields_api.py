@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.factories import WorkspaceFixture, add_member, build_workspace, login
 
@@ -47,6 +48,18 @@ async def workspace(
         email="rep@example.com",
         template_name="Caller",
     )
+    # Everything above is committed, but the reads that follow each commit have
+    # left this session holding an open transaction. Declaring an indexed field
+    # runs `CREATE INDEX CONCURRENTLY`, which waits for every transaction older
+    # than itself to finish — so an idle-in-transaction fixture does not fail
+    # the test, it hangs it. Let go of the transaction here rather than leaving
+    # that trap for the next person to add an index test.
+    #
+    # `commit`, not `rollback`: the factory hands back live ORM objects and
+    # rollback expires every one of them, `expire_on_commit=False`
+    # notwithstanding — the next attribute read would then emit IO from a
+    # non-async context and fail as MissingGreenlet.
+    await db_session.commit()
     return fixture
 
 
@@ -515,3 +528,114 @@ async def test_a_rep_cannot_change_the_schema(
         json={"label": "Sneaky", "field_type": "TEXT"},
     )
     assert forbidden.status_code == 403
+
+
+# --- the indexed-field worker ------------------------------------------------
+#
+# The three tests above assert the declaration contract: a row appears, the
+# limit holds, the name is generated. None of them says whether an index is
+# ever built — and between M5 and this milestone none was. `declare_indexed`
+# wrote PENDING and nothing invoked the worker, so the status never moved and
+# M6's "sorting is restricted to indexed fields" contract described an index
+# that did not exist.
+
+
+async def _index_validity(db_session: AsyncSession, name: str) -> bool | None:
+    """None when no such index exists, else whether Postgres considers it valid.
+
+    Committing before returning is not tidiness: `CREATE INDEX CONCURRENTLY`
+    and `DROP INDEX CONCURRENTLY` both wait for every transaction older than
+    themselves, so a lingering read snapshot here would stall the next one.
+    """
+    rows = await db_session.execute(
+        text(
+            "select i.indisvalid from pg_class c "
+            "join pg_index i on i.indexrelid = c.oid where c.relname = :name"
+        ),
+        {"name": name},
+    )
+    validity: bool | None = rows.scalar_one_or_none()
+    await db_session.commit()
+    return validity
+
+
+async def test_declaring_a_field_actually_builds_the_index(
+    api: AsyncClient, workspace: WorkspaceFixture, db_session: AsyncSession
+) -> None:
+    """PENDING has to become READY, against a real index in the catalogue."""
+    headers = await _admin(api, workspace)
+    field = await _create_field(api, workspace, headers, label="Sortable", field_type="TEXT")
+
+    declared = await api.post(
+        workspace.path("/settings/indexed-fields"),
+        headers=headers,
+        json={"field_id": field["id"]},
+    )
+    assert declared.status_code == 202
+    name = declared.json()["index_name"]
+    # The declaration is still PENDING in the response — the build runs after
+    # it, which is the whole reason this endpoint answers 202.
+    assert declared.json()["status"] == "PENDING"
+
+    listed = await api.get(workspace.path("/settings/indexed-fields"), headers=headers)
+    entry = next(i for i in listed.json() if i["field_id"] == field["id"])
+    assert entry["status"] == "READY", entry["last_error"]
+    assert entry["last_error"] is None
+
+    assert await _index_validity(db_session, name) is True
+
+
+async def test_undeclaring_a_field_drops_the_index(
+    api: AsyncClient, workspace: WorkspaceFixture, db_session: AsyncSession
+) -> None:
+    headers = await _admin(api, workspace)
+    field = await _create_field(api, workspace, headers, label="Temporary", field_type="TEXT")
+
+    declared = await api.post(
+        workspace.path("/settings/indexed-fields"),
+        headers=headers,
+        json={"field_id": field["id"]},
+    )
+    name = declared.json()["index_name"]
+    assert await _index_validity(db_session, name) is True
+
+    dropped = await api.delete(
+        workspace.path(f"/settings/indexed-fields/{field['id']}"),
+        headers=headers,
+    )
+    assert dropped.status_code == 202
+    assert dropped.json()["index_name"] == name
+
+    assert await _index_validity(db_session, name) is None
+
+    remaining = await api.get(workspace.path("/settings/indexed-fields"), headers=headers)
+    assert [i for i in remaining.json() if i["field_id"] == field["id"]] == []
+
+
+async def test_a_field_can_be_indexed_again_after_being_undeclared(
+    api: AsyncClient, workspace: WorkspaceFixture, db_session: AsyncSession
+) -> None:
+    """Re-declaring must rebuild, not silently inherit the previous index.
+
+    `CREATE INDEX ... IF NOT EXISTS` makes this worth pinning down: if a stale
+    index of the same name survived the drop, the rebuild would skip and report
+    READY over whatever was already there.
+    """
+    headers = await _admin(api, workspace)
+    field = await _create_field(api, workspace, headers, label="Recurring", field_type="TEXT")
+    body = {"field_id": field["id"]}
+
+    first = await api.post(workspace.path("/settings/indexed-fields"), headers=headers, json=body)
+    name = first.json()["index_name"]
+    await api.delete(workspace.path(f"/settings/indexed-fields/{field['id']}"), headers=headers)
+    assert await _index_validity(db_session, name) is None
+
+    again = await api.post(workspace.path("/settings/indexed-fields"), headers=headers, json=body)
+    assert again.status_code == 202
+    # Deterministic from the two ids, so the rebuilt index takes the same name.
+    assert again.json()["index_name"] == name
+    assert await _index_validity(db_session, name) is True
+
+    listed = await api.get(workspace.path("/settings/indexed-fields"), headers=headers)
+    entry = next(i for i in listed.json() if i["field_id"] == field["id"])
+    assert entry["status"] == "READY"

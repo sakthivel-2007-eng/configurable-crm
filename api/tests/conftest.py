@@ -166,6 +166,7 @@ def app(settings: Settings) -> FastAPI:
 def wired_app(
     app: FastAPI,
     settings: Settings,
+    schema_engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> FastAPI:
     """The application with a live database, a fake Redis and a hasher.
@@ -177,6 +178,10 @@ def wired_app(
     app.state.redis = FakeRedis()
     app.state.password_hasher = PasswordHasherService(settings)
     app.state.session_factory = session_factory
+    # Background tasks reach for the engine directly rather than a session: the
+    # indexed-field worker runs `CREATE INDEX CONCURRENTLY`, which needs its own
+    # AUTOCOMMIT connection. The lifespan sets this in production.
+    app.state.engine = schema_engine
 
     async def override_get_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:

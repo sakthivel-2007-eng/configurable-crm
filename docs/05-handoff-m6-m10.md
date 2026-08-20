@@ -193,6 +193,40 @@ cd web && pnpm tsc --noEmit && pnpm lint && pnpm format:check && pnpm exec playw
 
 ## 3. M6 — Lead list, filters, history filters *(8–10 days)*
 
+> **Update, 21 Aug 2026 — M6 has landed.** `3c6b2b4` (backend), `231d845`
+> (demo seed + latency harness), `c7db934` (frontend), plus quick filters.
+> Revision `0006_m6_filters`. 447 backend tests, 71 Playwright. Both acceptance
+> checks work through the builder against the 50k workspace, and p95 is 27–62ms
+> across seven query shapes against the 300ms budget.
+>
+> Four things the section below did not anticipate, all now settled:
+>
+> - **The DSL cannot express stage or assignee.** §6.1 defines a field rule as
+>   referencing `lead_fields.key`, and those two are columns. They are *quick
+>   filters* — query parameters beside the filter document, as
+>   `02-api-contract.md` has them — not DSL nodes. Do not add a pseudo-field key
+>   for them.
+> - **The JSONB key must reach SQL as a literal.** Postgres matches an
+>   expression index by comparing expression trees, so `values ->> $1` can never
+>   use an index built on `(values ->> 'budget')`. `compiler._json_path`
+>   re-validates the slug and interpolates it; values stay bound. Without this,
+>   declaring a field indexed does nothing.
+> - **Searchable is a property of the field *type*, not a toggle.** §1.4 lists
+>   exactly four field properties. `spec.searchable` in the registry decides.
+> - **`ScopedSession` stamps `session.info` permanently.** Wrapping a session
+>   scopes every later query on it, including ones made after the scoped work
+>   finishes. Use a fresh session for anything addressing another workspace.
+> - **`alembic check` reports the runtime indexes as drift.** Once any workspace
+>   declares an indexed field, the worker's `ix_lv_…` expression indexes exist in
+>   the database and no migration describes them — by design, since they are the
+>   one sanctioned piece of runtime DDL (rule 7). A drift check is only
+>   meaningful against a database where nothing has been declared indexed, which
+>   is what CI gets.
+>
+> Not built, and deliberately: `saved_filters` reorder and duplicate exist on
+> the API and have tests, but the UI exposes neither yet — the sidebar that
+> would need them is M7's.
+
 The spec is `00-milestones.md` M6 and `PROMPTS.md` M6. What follows is what the
 spec does not tell you.
 
@@ -492,8 +526,8 @@ These are the ones that have actually caused rework here.
 ```
 0.1 LeadOwnership          done  4c07390
 0.2 indexed-field worker   done  5f14730
-    demo seed (§8)         ~1d   M6's performance target depends on it
-M6  list + filters         8-10d
+    demo seed (§8)         done  231d845
+M6  list + filters         done  3c6b2b4 · 231d845 · c7db934
 M7  tasks, bulk, undo      7-9d
 M8  assignment, scheduler  6-8d
 M9  dashboards, reports    6-8d

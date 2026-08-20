@@ -95,6 +95,10 @@ function useLeadMutation<TVariables, TResult>(
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: leadsKey(workspaceId) }),
+        // M6 draws the list from `POST /leads/search`, which is a different
+        // cache entry. Without this a newly created or edited lead is written
+        // to the server and then not shown, which reads as the write failing.
+        queryClient.invalidateQueries({ queryKey: ['lead-search', workspaceId] }),
         queryClient.invalidateQueries({ queryKey: ['lead-actions', workspaceId] }),
         queryClient.invalidateQueries({ queryKey: ['changesets', workspaceId] }),
       ])

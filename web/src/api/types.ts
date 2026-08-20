@@ -459,3 +459,107 @@ export interface RenderedTemplate {
   /** Placeholders that resolved to nothing — including fields the sender cannot view. */
   readonly unresolved: readonly string[]
 }
+
+// --- the filter DSL (M6) -----------------------------------------------------
+//
+// The mirror of `app/filters/dsl.py`. Two families of node in one union: field
+// rules ask about a lead's current state, history predicates ask about its
+// timeline. The builder renders both as first-class rules — a user never sees
+// or edits the JSON these describe.
+
+/** A window, relative or absolute. Exactly one form, matching the server. */
+export interface FilterWindow {
+  readonly last_days?: number
+  readonly from?: string
+  readonly to?: string
+}
+
+export interface FieldRuleNode {
+  readonly type: 'field'
+  readonly key: string
+  readonly op: string
+  readonly value?: unknown
+}
+
+export interface ActionPerformedNode {
+  readonly type: 'action_performed'
+  readonly action_kind?: ActionKind | null
+  readonly action_type_id?: string | null
+  readonly actor_id?: string | null
+  readonly payload_match?: Record<string, unknown>
+  readonly min_count?: number
+  readonly within?: FilterWindow | null
+}
+
+export interface ActionNotPerformedNode {
+  readonly type: 'action_not_performed'
+  readonly action_kind?: ActionKind | null
+  readonly action_type_id?: string | null
+  readonly actor_id?: string | null
+  readonly payload_match?: Record<string, unknown>
+  readonly within?: FilterWindow | null
+}
+
+export interface StatusChangedNode {
+  readonly type: 'status_changed'
+  readonly from_stage_id?: string | null
+  readonly to_stage_id?: string | null
+  readonly within?: FilterWindow | null
+}
+
+export interface AssigneeChangedNode {
+  readonly type: 'assignee_changed'
+  readonly from_membership_id?: string | null
+  readonly to_membership_id?: string | null
+  readonly within?: FilterWindow | null
+}
+
+export interface GroupNode {
+  readonly type: 'group'
+  readonly op: 'AND' | 'OR'
+  readonly children: readonly FilterNode[]
+}
+
+export type HistoryNode =
+  ActionPerformedNode | ActionNotPerformedNode | StatusChangedNode | AssigneeChangedNode
+
+export type FilterNode = GroupNode | FieldRuleNode | HistoryNode
+
+export type SavedFilterVisibility = 'PERSONAL' | 'SHARED' | 'ROLE'
+
+export interface SavedFilter {
+  readonly id: string
+  readonly name: string
+  readonly description: string | null
+  readonly definition: FilterNode
+  readonly visibility: SavedFilterVisibility
+  readonly template_id: string | null
+  readonly owner_membership_id: string | null
+  readonly sort_order: number
+  readonly is_archived: boolean
+  readonly created_at: string
+}
+
+export interface FilterStats {
+  readonly filter_id: string
+  readonly total: number
+  readonly by_stage: Record<string, number>
+}
+
+export interface TableLayout {
+  readonly id: string
+  readonly filter_id: string | null
+  readonly columns: readonly string[]
+  readonly column_widths: Record<string, number>
+  readonly sort_key: string | null
+  readonly sort_desc: boolean
+}
+
+export interface LeadSearchRequest {
+  readonly filter?: FilterNode | null
+  readonly q?: string | null
+  readonly sort?: string
+  readonly limit?: number
+  readonly offset?: number
+  readonly columns?: readonly string[] | null
+}

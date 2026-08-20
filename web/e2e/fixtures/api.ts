@@ -625,6 +625,25 @@ export interface StubHandle {
   /** Forces the next N authenticated calls to answer 401. */
   expireAccessToken: () => void
   readonly refreshCount: () => number
+  /**
+   * The body of the last `POST /leads/search`.
+   *
+   * Lets a spec assert the *document the builder produced* — which is the only
+   * way to check that a history predicate was encoded correctly without
+   * reaching into component state or showing the user JSON.
+   */
+  readonly lastSearch: () => LastSearch | null
+}
+
+export interface LastSearch {
+  readonly filter?: {
+    readonly type?: string
+    readonly op?: string
+    readonly children?: readonly Record<string, unknown>[]
+  } | null
+  readonly q?: string | null
+  readonly sort?: string
+  readonly columns?: readonly string[] | null
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -647,6 +666,11 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
   let currentMembers = [...members]
   let currentFields = [...(options.fields ?? BUILTIN_FIELDS)]
   let currentLeads = [...(options.leads ?? [lead()])]
+  let savedFilters: Record<string, unknown>[] = []
+  let currentLayout: Record<string, unknown> | null = null
+  //: The last search body the page sent, so a spec can assert the *shape* of
+  //: the filter the builder produced without reading the component's state.
+  let lastSearchBody: LastSearch | null = null
   let currentTemplates = [...MESSAGE_TEMPLATES]
   const customActionsEnabled = options.customActionsEnabled ?? true
 
@@ -908,6 +932,75 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
       })
     }
 
+    // --- M6: filtered search, saved filters, layouts ----------------------
+    // The stub does not evaluate the DSL — that is the backend's job and it has
+    // its own tests. What these specs check is that the builder *sends* a
+    // well-formed document and renders what comes back.
+    if (path.endsWith('/leads/search') && method === 'POST') {
+      const body = route.request().postDataJSON() as LastSearch
+      lastSearchBody = body
+      const filtered =
+        body.filter && Array.isArray(body.filter.children) && body.filter.children.length > 0
+          ? currentLeads.slice(0, 1)
+          : currentLeads
+      return json(route, 200, {
+        items: filtered,
+        total: filtered.length,
+        limit: 25,
+        offset: 0,
+      })
+    }
+
+    if (path.endsWith('/filters') && method === 'GET') {
+      return json(route, 200, savedFilters)
+    }
+
+    if (path.endsWith('/filters') && method === 'POST') {
+      const body = route.request().postDataJSON() as {
+        name?: string
+        definition?: unknown
+        visibility?: string
+        template_id?: string | null
+      }
+      const created = {
+        id: `filter-${savedFilters.length + 1}`,
+        name: body.name ?? 'Untitled',
+        description: null,
+        definition: body.definition,
+        visibility: body.visibility ?? 'PERSONAL',
+        template_id: body.template_id ?? null,
+        owner_membership_id: 'membership-1',
+        sort_order: savedFilters.length,
+        is_archived: false,
+        created_at: '2026-08-21T09:00:00Z',
+      }
+      savedFilters = [...savedFilters, created]
+      return json(route, 201, created)
+    }
+
+    const filterIdMatch = /\/filters\/([^/]+)$/.exec(path)
+    if (filterIdMatch && method === 'DELETE') {
+      savedFilters = savedFilters.filter((entry) => entry.id !== filterIdMatch[1])
+      return json(route, 200, { ...savedFilters[0], is_archived: true })
+    }
+
+    if (path.endsWith('/layouts') && method === 'GET') {
+      return json(route, 200, currentLayout)
+    }
+
+    if (path.endsWith('/layouts') && method === 'PUT') {
+      const body = route.request().postDataJSON() as { columns?: string[] }
+      currentLayout = {
+        id: 'layout-1',
+        filter_id: null,
+        columns: body.columns ?? [],
+        column_widths: {},
+        sort_key: null,
+        sort_desc: true,
+      }
+      return json(route, 200, currentLayout)
+    }
+
     // --- M5: leads, timeline, templates -----------------------------------
     if (path.endsWith('/leads') && method === 'GET') {
       return json(route, 200, {
@@ -1025,5 +1118,6 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
       accessTokenExpired = true
     },
     refreshCount: () => refreshCount,
+    lastSearch: () => lastSearchBody,
   }
 }

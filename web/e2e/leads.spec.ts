@@ -24,14 +24,17 @@ async function signIn(page: Page, options: StubOptions = {}) {
 }
 
 test.describe('lead list', () => {
-  test('columns are the workspace’s own headline fields', async ({ page }) => {
+  test('the grid opens on the default columns', async ({ page }) => {
     await signIn(page)
 
-    // H1 is Name and H2 is Phone for this workspace — both settings, not
-    // constants, so the header renders their labels rather than fixed ones.
+    // M6 replaced M5's fixed H1/H2 pair with a chosen column set, stored per
+    // member per filter. Until someone chooses, these four are the default —
+    // and every one of them is a column the *product* owns, not a field any
+    // workspace invented.
     const table = page.getByRole('table')
-    await expect(table.getByRole('columnheader', { name: 'Name' })).toBeVisible()
-    await expect(table.getByRole('columnheader', { name: 'Phone' })).toBeVisible()
+    for (const header of ['Identifier', 'Stage', 'Assignee', 'Last activity']) {
+      await expect(table.getByRole('columnheader', { name: header })).toBeVisible()
+    }
     await expect(page.getByTestId('lead-row')).toHaveCount(1)
   })
 

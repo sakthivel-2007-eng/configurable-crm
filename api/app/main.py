@@ -27,6 +27,7 @@ from app.routers import permission_templates as permission_templates_router
 from app.routers import pipeline as pipeline_router
 from app.routers import workspaces as workspaces_router
 from app.services.health import HealthService
+from app.services.lead_ownership import DatabaseLeadOwnership, set_lead_ownership
 from app.storage import create_s3_client
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved
+
+    # `leads` exists from M5, so the member lifecycle gets the real open-lead
+    # count instead of the M1 placeholder that always answered zero. Registered
+    # here rather than in the lifespan: it is a stateless swap with no client to
+    # tear down, and a test building the app without entering the lifespan must
+    # still get the guarantee rather than the placeholder.
+    set_lead_ownership(DatabaseLeadOwnership())
 
     if resolved.cors_origins:
         app.add_middleware(

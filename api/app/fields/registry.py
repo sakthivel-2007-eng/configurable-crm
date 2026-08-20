@@ -102,6 +102,16 @@ class FieldTypeSpec:
     normalise: Callable[[Any, ValidationContext], Any]
     #: Whether the type draws its values from `field_options`.
     uses_options: bool = False
+    #: Whether this type's values belong in `leads.search_vector`.
+    #:
+    #: A property of the *type*, not a per-field toggle: §1.4 of the
+    #: configuration model defines exactly four field toggles and searchable is
+    #: not among them, so inventing a fifth would be adding configuration
+    #: surface the product does not have. Free text, addresses and option codes
+    #: are what someone types into a search box; amounts, dates and checkboxes
+    #: are what they filter on, and folding them into the vector would make
+    #: "2024" match a date, a phone fragment and a price alike.
+    searchable: bool = False
     #: JSON-schema-ish description of the type's `config` object, so the
     #: settings UI can render type-specific configuration generically.
     config_schema: Mapping[str, Any] = dataclasses.field(default_factory=dict)
@@ -114,6 +124,7 @@ class FieldTypeSpec:
             "description": self.description,
             "storage": self.storage,
             "uses_options": self.uses_options,
+            "searchable": self.searchable,
             "operators": [op.value for op in self.operators],
             "renderer": dict(self.renderer),
             "config_schema": dict(self.config_schema),
@@ -597,6 +608,7 @@ def _spec(
     normalise: Callable[[Any, ValidationContext], Any],
     *,
     uses_options: bool = False,
+    searchable: bool = False,
     config_schema: Mapping[str, Any] | None = None,
 ) -> FieldTypeSpec:
     return FieldTypeSpec(
@@ -608,6 +620,7 @@ def _spec(
         renderer=renderer,
         normalise=normalise,
         uses_options=uses_options,
+        searchable=searchable,
         config_schema=config_schema or {},
     )
 
@@ -621,6 +634,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         ops.TEXTUAL,
         {"widget": "text", "multiline": False},
         _norm_text,
+        searchable=True,
         config_schema={"multiline": {"type": "boolean", "default": False}},
     ),
     LeadFieldType.DROPDOWN: _spec(
@@ -632,6 +646,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         {"widget": "select", "multiple": False},
         _norm_dropdown,
         uses_options=True,
+        searchable=True,
     ),
     LeadFieldType.TAGS: _spec(
         "TAGS",
@@ -642,6 +657,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         {"widget": "select", "multiple": True},
         _norm_tags,
         uses_options=True,
+        searchable=True,
     ),
     LeadFieldType.EMAIL: _spec(
         "EMAIL",
@@ -651,6 +667,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         ops.TEXTUAL,
         {"widget": "email", "inputMode": "email"},
         _norm_email,
+        searchable=True,
     ),
     LeadFieldType.PHONE: _spec(
         "PHONE",
@@ -660,6 +677,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         ops.TEXTUAL,
         {"widget": "phone", "inputMode": "tel", "normalisedToE164": True},
         _norm_phone,
+        searchable=True,
     ),
     LeadFieldType.CHECKBOX: _spec(
         "CHECKBOX",
@@ -709,6 +727,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         ops.TEXTUAL,
         {"widget": "url", "inputMode": "url"},
         _norm_website,
+        searchable=True,
     ),
     LeadFieldType.DEPENDENT_DROPDOWN: _spec(
         "DEPENDENT_DROPDOWN",
@@ -726,6 +745,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
         },
         _norm_dependent_dropdown,
         uses_options=True,
+        searchable=True,
         config_schema={
             "parent_field_id": {
                 "type": "uuid",
@@ -767,6 +787,7 @@ LEAD_FIELD_TYPES: dict[LeadFieldType, FieldTypeSpec] = {
             "lngKey": "lng",
         },
         _norm_location,
+        searchable=True,
     ),
 }
 

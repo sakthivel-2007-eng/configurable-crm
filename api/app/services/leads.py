@@ -19,13 +19,17 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.errors import api_error, conflict, not_found
+from app.fields.search import SEARCH_CONFIG, search_text_for
 from app.fields.values import FieldValidationError, ValueValidator
-from app.models.enums import ChangesetSource, StageKind
-from app.models.field import FieldOption, LeadField
+from app.filters.compiler import FilterCompiler
+from app.filters.dsl import FilterNode, validate_shape
+from app.models.enums import ChangesetSource, IndexedFieldStatus, StageKind
+from app.models.field import FieldOption, IndexedField, LeadField
 from app.models.lead import Action, Lead
 from app.models.pipeline import LostReason, Stage
 from app.models.workspace import Membership, Workspace
@@ -158,14 +162,22 @@ class LeadService:
         )
         return rows.scalars().all(), int(total_result.scalar_one())
 
-    async def project(self, lead: Lead) -> dict[str, Any]:
+    async def project(self, lead: Lead, *, columns: Sequence[str] | None = None) -> dict[str, Any]:
         """The API representation, View-projected.
 
         The single place a lead becomes JSON. Every endpoint returns this, so
         there is no path by which a non-View field reaches a response.
+
+        `columns` narrows the hydrated values to what the caller asked for — a
+        50-field workspace should not ship 50 values per row to draw six
+        columns. It is applied *after* projection and can only ever subtract:
+        naming a field the caller cannot view does not reveal it.
         """
         validator = await self._load_schema()
         visible = self._projection.project_values(lead.values or {})
+        if columns is not None:
+            wanted = set(columns)
+            visible = {k: v for k, v in visible.items() if k in wanted}
 
         by_id = {f.id: f for f in self._fields}
         h1 = by_id.get(self._workspace.primary_field_1_id or uuid.uuid4())
@@ -238,6 +250,7 @@ class LeadService:
             created_by_id=self._actor_id,
         )
         self._session.add(lead)
+        self._refresh_search_vector(lead)
         await self._session.flush()
 
         writer = ActionWriter(self._session, actor_id=self._actor_id)
@@ -349,8 +362,193 @@ class LeadService:
             lead.rating = rating
             writer.record_rating_change(lead, old_rating=old_rating, new_rating=rating)
 
+        # After every mutation, not inside the `values` branch: the identity
+        # value feeds the vector too, and it can change on a path that touched
+        # no searchable field.
+        self._refresh_search_vector(lead)
         await self._session.flush()
         return lead, writer
+
+    def _refresh_search_vector(self, lead: Lead) -> None:
+        """Recompute `search_vector` from the lead's searchable values.
+
+        Assigned as a SQL expression rather than a computed string so the
+        `to_tsvector` runs in Postgres with the same configuration the query
+        side uses — building it in Python would mean shipping a parsed vector
+        and trusting the two implementations to agree.
+
+        Called on every write path. A lead whose vector lagged its values would
+        be invisible to search, which is worse than being unindexed: the user
+        sees an empty result and concludes the lead is not there.
+        """
+        document = search_text_for(
+            lead.values or {}, self._fields, identity_value=lead.identity_value
+        )
+        lead.search_vector = func.to_tsvector(SEARCH_CONFIG, document)
+
+    # --- searching ---------------------------------------------------------
+
+    def sortable_columns(self) -> dict[str, Any]:
+        """Built-in columns a caller may sort by, by their API name.
+
+        Deliberately a closed set of real columns. Everything else has to be a
+        declared indexed field, because sorting 50,000 rows on an unindexed
+        JSONB expression is the one query shape that cannot be made fast after
+        the fact.
+        """
+        return {
+            "created_at": Lead.created_at,
+            "updated_at": Lead.updated_at,
+            "last_action_at": Lead.last_action_at,
+            "score": Lead.score,
+            "rating": Lead.rating,
+            "identity_value": Lead.identity_value,
+            "stage_id": Lead.stage_id,
+            "assignee_id": Lead.assignee_id,
+        }
+
+    async def _sort_expression(self, sort: str) -> Any:
+        """Resolve a sort key to a column, or refuse with the fix.
+
+        `-key` sorts descending, matching the API contract's `sort` parameter.
+        """
+        await self._load_schema()
+        descending = sort.startswith("-")
+        key = sort.lstrip("-")
+
+        if (column := self.sortable_columns().get(key)) is not None:
+            return column.desc().nullslast() if descending else column.asc().nullslast()
+
+        field = next((f for f in self._fields if f.key == key), None)
+        if field is None or not self._projection.filterable(key):
+            raise api_error(
+                400, "unknown_sort_field", f"There is no field named {key!r} to sort by"
+            )
+
+        rows = await self._session.execute(
+            self._session.select(IndexedField).where(IndexedField.field_id == field.id).limit(1)
+        )
+        declared: IndexedField | None = rows.scalar_one_or_none()
+        if declared is None:
+            raise api_error(
+                400,
+                "field_not_indexed",
+                f"{field.label} must be declared an indexed field before the list can "
+                f"be sorted by it. Settings -> Fields -> {field.label} -> Index.",
+                field_key=key,
+            )
+        if declared.status != IndexedFieldStatus.READY:
+            # Sorting on a PENDING declaration would work and be slow, which is
+            # exactly what the restriction exists to prevent. Distinguished from
+            # "not indexed" so the admin waits rather than re-declaring.
+            raise api_error(
+                400,
+                "index_not_ready",
+                f"The index on {field.label} is {declared.status.lower()}. "
+                f"Sorting by it will be available once the index finishes building.",
+                field_key=key,
+                status=declared.status,
+            )
+
+        # The literal spelling the expression index was built on — see
+        # `app.filters.compiler._json_path`.
+        expression: ColumnElement[Any] = literal_column(f"leads.values ->> '{field.key}'")
+        return expression.desc().nullslast() if descending else expression.asc().nullslast()
+
+    async def compile_filter(self, node: FilterNode | None) -> Any:
+        """Turn a filter document into a WHERE clause, or None for no filter.
+
+        The permission gate lives inside `FilterCompiler`, per field, so this
+        is a thin seam — but it is the seam every caller uses, which is what
+        keeps the gate from being skipped by a new endpoint.
+        """
+        if node is None:
+            return None
+        # The compiler resolves keys against the workspace's field definitions,
+        # and those are loaded lazily. Without this the field map is empty and
+        # every rule looks like a filter on a field nobody has.
+        await self._load_schema()
+        try:
+            validate_shape(node)
+        except ValueError as exc:
+            raise api_error(422, "invalid_filter", str(exc)) from exc
+
+        compiler = FilterCompiler(
+            fields=self._fields,
+            projection=self._projection,
+            timezone=self._workspace.timezone,
+        )
+        return compiler.compile(node)
+
+    async def count_by_stage(self, clause: Any = None) -> tuple[int, dict[str, int]]:
+        """Total and per-stage counts for a filter, in one query.
+
+        Grouped rather than a count per stage: a workspace with a dozen stages
+        would otherwise pay a dozen full filter evaluations to draw one summary,
+        and a history predicate is not cheap enough to run twelve times.
+
+        Leads with no stage are counted in the total under a `null` key, so the
+        parts always sum to the whole.
+        """
+        await self._load_schema()
+        statement = self._session.select(Lead).where(Lead.deleted_at.is_(None))
+        if (visibility := self._visibility_clause()) is not None:
+            statement = statement.where(visibility)
+        if clause is not None:
+            statement = statement.where(clause)
+
+        subquery = statement.subquery()
+        rows = await self._session.execute(
+            select(subquery.c.stage_id, func.count())
+            .select_from(subquery)
+            .group_by(subquery.c.stage_id)
+        )
+        by_stage: dict[str, int] = {}
+        total = 0
+        for stage_id, count in rows.all():
+            by_stage[str(stage_id) if stage_id else "null"] = int(count)
+            total += int(count)
+        return total, by_stage
+
+    async def search_leads(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        clause: Any = None,
+        search: str | None = None,
+        sort: str = "-created_at",
+    ) -> tuple[Sequence[Lead], int]:
+        """The list endpoint's query: filter, search, sort, paginate.
+
+        Never returns actions (architecture rule 6) and never returns a lead
+        outside the caller's visibility.
+        """
+        statement = self._session.select(Lead).where(Lead.deleted_at.is_(None))
+        if (visibility := self._visibility_clause()) is not None:
+            statement = statement.where(visibility)
+        if clause is not None:
+            statement = statement.where(clause)
+        if search:
+            await self._load_schema()
+            compiler = FilterCompiler(
+                fields=self._fields,
+                projection=self._projection,
+                timezone=self._workspace.timezone,
+            )
+            statement = statement.where(compiler.search_clause(search))
+
+        total_result = await self._session.execute(
+            select(func.count()).select_from(statement.subquery())
+        )
+        order = await self._sort_expression(sort)
+        # `id` breaks ties: two leads created in the same millisecond would
+        # otherwise be ordered arbitrarily, and a row could appear on both page
+        # one and page two.
+        rows = await self._session.execute(
+            statement.order_by(order, Lead.id).limit(limit).offset(offset)
+        )
+        return rows.scalars().all(), int(total_result.scalar_one())
 
     async def soft_delete(self, lead_id: uuid.UUID) -> Lead:
         """Soft delete only (architecture rule 13). Leads never hard-delete."""

@@ -20,6 +20,7 @@ __all__ = [
     "IndexedFieldStatus",
     "LeadFieldType",
     "PermissionGrant",
+    "SavedFilterVisibility",
     "StageKind",
     "SystemActionKind",
     "TemplateChannel",
@@ -166,3 +167,21 @@ class TemplateChannel(enum.StrEnum):
     WHATSAPP = "WHATSAPP"
     SMS = "SMS"
     EMAIL = "EMAIL"
+
+
+class SavedFilterVisibility(enum.StrEnum):
+    """Who a saved filter is for (docs/01-data-model.md §6).
+
+    PERSONAL is the author's alone. SHARED is the whole workspace. ROLE hands
+    it to everyone on one permission template, which is how a manager gives
+    their callers a worklist without giving it to marketing.
+
+    Note this governs *visibility of the filter*, never of the leads it
+    returns: running someone else's filter still projects through the runner's
+    own field grants, so a shared filter cannot be used to read a column its
+    reader lacks.
+    """
+
+    PERSONAL = "PERSONAL"
+    SHARED = "SHARED"
+    ROLE = "ROLE"

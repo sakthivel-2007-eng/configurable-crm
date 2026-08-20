@@ -19,6 +19,7 @@ from app.models.enums import (
     IndexedFieldStatus,
     LeadFieldType,
     PermissionGrant,
+    SavedFilterVisibility,
     StageKind,
     SystemActionKind,
     TemplateChannel,
@@ -42,6 +43,7 @@ from app.models.mixins import Base, TenantModel, TimestampMixin
 from app.models.permission import TemplateFieldGrant, TemplateLeadView
 from app.models.pipeline import CallDisposition, LostReason, Stage
 from app.models.user import RefreshToken, User
+from app.models.view import SavedFilter, TableLayout
 from app.models.workspace import (
     AvailabilityLog,
     Membership,
@@ -75,9 +77,12 @@ __all__ = [
     "PermissionGrant",
     "PermissionTemplate",
     "RefreshToken",
+    "SavedFilter",
+    "SavedFilterVisibility",
     "Stage",
     "StageKind",
     "SystemActionKind",
+    "TableLayout",
     "TemplateChannel",
     "TemplateFieldGrant",
     "TemplateLeadView",

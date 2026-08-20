@@ -22,6 +22,7 @@ from app.models.field import CustomActionType
 from app.models.lead import Changeset
 from app.models.pipeline import CallDisposition
 from app.schemas.common import Page
+from app.schemas.filter import LeadSearchRequest
 from app.schemas.lead import (
     ActionRead,
     CallLogCreate,
@@ -79,14 +80,48 @@ async def list_leads(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
     q: Annotated[str | None, Query(max_length=200)] = None,
+    sort: Annotated[str, Query(max_length=80)] = "-created_at",
+    columns: Annotated[list[str] | None, Query()] = None,
 ) -> Page[dict[str, Any]]:
-    """Architecture rule 6: the list endpoint never returns actions."""
-    leads, total = await service.list_leads(limit=limit, offset=offset, search=q)
+    """Architecture rule 6: the list endpoint never returns actions.
+
+    The quick path: search and sort, no filter document. Anything structured
+    goes to `POST /leads/search`, which speaks the same DSL a saved filter does.
+    """
+    leads, total = await service.search_leads(limit=limit, offset=offset, search=q, sort=sort)
     return Page(
-        items=[await service.project(lead) for lead in leads],
+        items=[await service.project(lead, columns=columns) for lead in leads],
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.post("/leads/search", summary="List leads matching a filter DSL document")
+async def search_leads(
+    payload: LeadSearchRequest,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[LeadService, Depends(_lead_service)],
+) -> Page[dict[str, Any]]:
+    """The full filter DSL, including the four history predicates.
+
+    Declared before `/leads/{lead_id}`: FastAPI matches in declaration order,
+    so a literal segment after a uuid placeholder would be parsed as an id and
+    422 (conventions §5 — this has bitten twice already).
+    """
+    clause = await service.compile_filter(payload.filter)
+    leads, total = await service.search_leads(
+        limit=payload.limit,
+        offset=payload.offset,
+        clause=clause,
+        search=payload.q,
+        sort=payload.sort,
+    )
+    return Page(
+        items=[await service.project(lead, columns=payload.columns) for lead in leads],
+        total=total,
+        limit=payload.limit,
+        offset=payload.offset,
     )
 
 

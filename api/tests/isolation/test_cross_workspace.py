@@ -278,6 +278,37 @@ _BODIES: dict[str, dict[str, object]] = {
 }
 
 
+# --- M6: saved filters, layouts, filtered search ------------------------------
+
+M6_COLLECTION_ROUTES: list[str] = ["/filters", "/layouts"]
+
+M6_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/filters"),
+    ("PATCH", "/filters/reorder"),
+    ("PUT", "/layouts"),
+    ("POST", "/leads/search"),
+]
+
+M6_FILTER_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/filters/{filter_id}"),
+    ("PATCH", "/filters/{filter_id}"),
+    ("DELETE", "/filters/{filter_id}"),
+    ("POST", "/filters/{filter_id}/duplicate"),
+    ("GET", "/filters/{filter_id}/stats"),
+]
+
+_M6_BODIES: dict[str, dict[str, object]] = {
+    "/filters/{filter_id}": {"name": "Renamed By An Outsider"},
+    "/filters": {
+        "name": "Smuggled",
+        "definition": {"type": "group", "op": "AND", "children": []},
+    },
+    "/filters/reorder": {"filter_ids": []},
+    "/layouts": {"columns": ["identity_value"]},
+    "/leads/search": {"filter": {"type": "group", "op": "AND", "children": []}},
+}
+
+
 # --- 1. by direct id ---------------------------------------------------------
 
 
@@ -668,6 +699,9 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(("GET", route) for route in M5_COLLECTION_ROUTES)
     declared.update(M5_COLLECTION_WRITE_ROUTES)
     declared.update(M5_TEMPLATE_ROUTES)
+    declared.update(M6_FILTER_ROUTES)
+    declared.update(("GET", route) for route in M6_COLLECTION_ROUTES)
+    declared.update(M6_COLLECTION_WRITE_ROUTES)
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

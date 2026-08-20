@@ -8,6 +8,9 @@ async function signIn(page: Page, options: StubOptions = {}) {
   await page.getByLabel('Email').fill('owner@example.com')
   await page.getByLabel('Password').fill('correct-horse-battery-staple')
   await page.getByRole('button', { name: 'Sign in' }).click()
+  // Leads is the landing page; members admin is a nav click away.
+  await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
+  await page.getByRole('link', { name: 'Team' }).click()
   await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
   return stub
 }

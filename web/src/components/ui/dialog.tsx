@@ -15,9 +15,15 @@ interface DialogProps {
   readonly description?: string
   readonly children: React.ReactNode
   readonly footer?: React.ReactNode
+  /**
+   * Extra classes for the dialog element. The field drawer and the permission
+   * matrix need more than the default `max-w-lg`; everything else is happy
+   * with it, so the width stays a caller's decision rather than a new variant.
+   */
+  readonly className?: string
 }
 
-function Dialog({ open, onClose, title, description, children, footer }: DialogProps) {
+function Dialog({ open, onClose, title, description, children, footer, className }: DialogProps) {
   const ref = React.useRef<HTMLDialogElement>(null)
 
   React.useEffect(() => {
@@ -42,6 +48,7 @@ function Dialog({ open, onClose, title, description, children, footer }: DialogP
       className={cn(
         'bg-background text-foreground w-full max-w-lg rounded-lg border p-0 shadow-lg',
         'open:animate-in backdrop:bg-black/50',
+        className,
       )}
     >
       <div className="flex flex-col gap-4 p-6">

@@ -4,6 +4,22 @@ import { Button } from '@/components/ui/button'
 import { useAuth } from '@/features/auth/context'
 
 /**
+ * Every tenant screen, in the order an admin meets them: work the leads, then
+ * configure the schema that shapes them, then the pipeline, then who can see
+ * what.
+ */
+const NAV_LINKS = [
+  { to: '/leads', label: 'Leads' },
+  { to: '/templates', label: 'Templates' },
+  { to: '/members', label: 'Team' },
+  { to: '/settings/fields', label: 'Fields' },
+  { to: '/settings/pipeline', label: 'Pipeline' },
+  { to: '/settings/custom-actions', label: 'Actions' },
+  { to: '/settings/permissions', label: 'Permissions' },
+  { to: '/status', label: 'System' },
+] as const
+
+/**
  * The authenticated shell.
  *
  * Guards two things in one place: you must be signed in, and you must have
@@ -35,13 +51,17 @@ export function AppLayout() {
       <header className="flex items-center justify-between gap-4 border-b px-6 py-3">
         <div className="flex items-center gap-6">
           <span className="font-semibold">{activeMembership.workspace.name}</span>
-          <nav className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" asChild>
-              <Link to="/members">Team</Link>
-            </Button>
-            <Button variant="ghost" size="sm" asChild>
-              <Link to="/status">System</Link>
-            </Button>
+          <nav className="flex flex-wrap items-center gap-1">
+            {NAV_LINKS.map((link) => (
+              <Button
+                key={link.to}
+                variant={location.pathname.startsWith(link.to) ? 'secondary' : 'ghost'}
+                size="sm"
+                asChild
+              >
+                <Link to={link.to}>{link.label}</Link>
+              </Button>
+            ))}
           </nav>
         </div>
 

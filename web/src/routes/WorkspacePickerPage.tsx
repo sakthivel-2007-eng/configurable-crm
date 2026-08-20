@@ -24,7 +24,11 @@ export function WorkspacePickerPage() {
 
   function choose(workspaceId: string) {
     selectWorkspace(workspaceId)
-    void navigate('/members', { replace: true })
+    // Navigate to the shell root and let its index route decide the landing
+    // page. Naming a screen here would mean two places to change whenever the
+    // first screen does — which is exactly how this ended up pointing at the
+    // members list after Leads became the landing page.
+    void navigate('/', { replace: true })
   }
 
   return (

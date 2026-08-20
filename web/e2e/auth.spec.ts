@@ -11,7 +11,7 @@ test.describe('sign in', () => {
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
 
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
     await expect(page.getByText('Acme Sales')).toBeVisible()
   })
 
@@ -79,7 +79,7 @@ test.describe('workspace picker', () => {
     await expect(page.getByText('Second Tenant')).toBeVisible()
 
     await page.getByRole('button', { name: 'Open Second Tenant' }).click()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
   })
 
   test('one usable workspace is entered without asking', async ({ page }) => {
@@ -108,7 +108,7 @@ test.describe('workspace picker', () => {
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
 
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
   })
 
   test('an unlicensed membership is listed but not selectable', async ({ page }) => {
@@ -136,7 +136,7 @@ test.describe('workspace picker', () => {
     await page.getByLabel('Email').fill('owner@example.com')
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
 
     await page.goto('/workspaces')
     await expect(page.getByRole('button', { name: 'Open Locked Out' })).toBeDisabled()
@@ -152,13 +152,13 @@ test.describe('session', () => {
     await page.getByLabel('Email').fill('owner@example.com')
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
 
     // Expire the token, then force the page to refetch.
     stub.expireAccessToken()
     await page.reload()
 
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
     expect(stub.refreshCount()).toBeGreaterThanOrEqual(1)
   })
 
@@ -173,11 +173,11 @@ test.describe('session', () => {
     await page.getByLabel('Email').fill('owner@example.com')
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
 
     stub.expireAccessToken()
     await page.reload()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
 
     // The members page issues /me, /me/permissions, /members, /members/seats
     // and /settings/permission-templates concurrently. One refresh, not five.
@@ -191,7 +191,7 @@ test.describe('session', () => {
     await page.getByLabel('Email').fill('owner@example.com')
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login/)
@@ -216,7 +216,7 @@ test.describe('workspace scoping', () => {
     await page.getByLabel('Email').fill('owner@example.com')
     await page.getByLabel('Password').fill('correct-horse-battery-staple')
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Leads' })).toBeVisible()
 
     const tenantCalls = stub.requests.filter((entry) => entry.includes('/workspaces/'))
     expect(tenantCalls.length).toBeGreaterThan(0)

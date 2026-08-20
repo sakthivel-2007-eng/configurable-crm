@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.filters.dsl import FilterNode
-from app.models.enums import SavedFilterVisibility
+from app.models.enums import SavedFilterVisibility, StageKind
 
 __all__ = [
     "FilterStats",
@@ -39,6 +39,13 @@ class LeadSearchRequest(BaseModel):
     sort: str = Field(default="-created_at", max_length=80)
     limit: int = Field(default=20, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
+    #: Quick filters — the current-state predicates that are columns on `leads`
+    #: rather than workspace-defined fields, so the DSL cannot express them.
+    stage_id: uuid.UUID | None = None
+    assignee_id: uuid.UUID | None = None
+    unassigned: bool = False
+    rating: int | None = Field(default=None, ge=1, le=5)
+    stage_kinds: list[StageKind] = Field(default_factory=list)
     #: Field keys the caller wants hydrated. `None` means every field they may
     #: view; an explicit list keeps a 50-column workspace's list response small.
     columns: list[str] | None = None

@@ -262,3 +262,56 @@ test.describe('sorting', () => {
     await expect.poll(() => stub.lastSearch()?.sort).toBe('-identity_value')
   })
 })
+
+test.describe('quick filters', () => {
+  test('the bar offers the workspace’s own stages', async ({ page }) => {
+    await signIn(page)
+
+    const bar = page.getByRole('group', { name: 'Quick filters' })
+    await expect(bar.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true')
+    // Stage names come from the pipeline endpoint. Nothing in the frontend
+    // knows what a workspace calls its stages.
+    await expect(bar.getByRole('button', { name: 'New' })).toBeVisible()
+    await expect(bar.getByRole('button', { name: 'Contacted' })).toBeVisible()
+  })
+
+  test('a stage chip narrows the list and clears on a second click', async ({ page }) => {
+    const stub = await signIn(page)
+    const bar = page.getByRole('group', { name: 'Quick filters' })
+
+    await bar.getByRole('button', { name: 'Contacted' }).click()
+    await expect.poll(() => stub.lastSearch()?.stage_id).toBeTruthy()
+
+    // The same control both applies and removes the filter.
+    await bar.getByRole('button', { name: 'Contacted' }).click()
+    await expect.poll(() => stub.lastSearch()?.stage_id ?? null).toBeNull()
+  })
+
+  test('assigned-to-me and unassigned are mutually exclusive', async ({ page }) => {
+    const stub = await signIn(page)
+    const bar = page.getByRole('group', { name: 'Quick filters' })
+
+    await bar.getByRole('button', { name: 'Assigned to me' }).click()
+    await expect.poll(() => stub.lastSearch()?.assignee_id).toBeTruthy()
+
+    // A lead cannot be both mine and nobody's, so choosing one drops the other.
+    await bar.getByRole('button', { name: 'Unassigned' }).click()
+    await expect.poll(() => stub.lastSearch()?.unassigned).toBe(true)
+    expect(stub.lastSearch()?.assignee_id ?? null).toBeNull()
+  })
+
+  test('quick filters and the builder narrow together', async ({ page }) => {
+    const stub = await signIn(page)
+
+    await page
+      .getByRole('group', { name: 'Quick filters' })
+      .getByRole('button', { name: 'New' })
+      .click()
+    await openBuilder(page)
+    await page.getByRole('button', { name: '+ Has not done' }).click()
+
+    // Both travel in one request: the quick filter is not replaced by the rule.
+    await expect.poll(() => stub.lastSearch()?.stage_id).toBeTruthy()
+    expect(stub.lastSearch()?.filter?.children).toHaveLength(1)
+  })
+})

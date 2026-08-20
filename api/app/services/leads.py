@@ -14,12 +14,13 @@ describes.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sqlalchemy import func, literal_column, select
+from sqlalchemy import func, literal_column, or_, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -37,7 +38,27 @@ from app.permissions.projection import FieldProjectionService, FieldWriteFilter
 from app.services.actions import ActionWriter, FieldDelta
 from app.tenancy.session import ScopedSession
 
-__all__ = ["LeadService"]
+__all__ = ["LeadService", "QuickFilters"]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QuickFilters:
+    """The one-click filters that live beside the DSL rather than inside it.
+
+    `docs/02-api-contract.md` gives `GET /leads` "quick filters" as a separate
+    concern from the filter document, and the split is the right one: these are
+    columns on `leads`, while a DSL field rule is by definition about a
+    workspace-defined field in `values`. Folding stage into the DSL would mean
+    inventing a pseudo-field key that no `lead_fields` row backs.
+    """
+
+    stage_id: uuid.UUID | None = None
+    assignee_id: uuid.UUID | None = None
+    unassigned: bool = False
+    rating: int | None = None
+    #: Structural pipeline kinds — "show me everything still open" without
+    #: naming stages the workspace may rename tomorrow.
+    stage_kinds: tuple[str, ...] = ()
 
 
 class LeadService:
@@ -480,7 +501,9 @@ class LeadService:
         )
         return compiler.compile(node)
 
-    async def count_by_stage(self, clause: Any = None) -> tuple[int, dict[str, int]]:
+    async def count_by_stage(
+        self, clause: Any = None, quick: QuickFilters | None = None
+    ) -> tuple[int, dict[str, int]]:
         """Total and per-stage counts for a filter, in one query.
 
         Grouped rather than a count per stage: a workspace with a dozen stages
@@ -496,6 +519,8 @@ class LeadService:
             statement = statement.where(visibility)
         if clause is not None:
             statement = statement.where(clause)
+        for quick_clause in self._quick_filter_clauses(quick or QuickFilters()):
+            statement = statement.where(quick_clause)
 
         subquery = statement.subquery()
         rows = await self._session.execute(
@@ -510,6 +535,39 @@ class LeadService:
             total += int(count)
         return total, by_stage
 
+    def _quick_filter_clauses(self, quick: QuickFilters) -> list[ColumnElement[bool]]:
+        """The current-state filters that are columns rather than fields.
+
+        Stage, assignee and rating live on `leads`, not in `values`, so the DSL
+        cannot reach them: §6.1 defines a field rule as referencing
+        `lead_fields.key`. They are the most-used filters in any CRM, which is
+        why the API contract gives `GET /leads` quick filters alongside the DSL
+        rather than folding them into it.
+        """
+        clauses: list[ColumnElement[bool]] = []
+        if quick.stage_id is not None:
+            clauses.append(Lead.stage_id == quick.stage_id)
+        if quick.assignee_id is not None:
+            clauses.append(Lead.assignee_id == quick.assignee_id)
+        if quick.unassigned:
+            # A separate flag rather than `assignee_id=null`: a query string
+            # cannot tell "no value given" from "explicitly nobody", and those
+            # mean opposite things here.
+            clauses.append(Lead.assignee_id.is_(None))
+        if quick.rating is not None:
+            clauses.append(Lead.rating == quick.rating)
+        if quick.stage_kinds:
+            closed = {StageKind.WON, StageKind.LOST}
+            wanted = {StageKind(kind) for kind in quick.stage_kinds}
+            stage_ids = select(Stage.id).where(Stage.kind.in_(wanted))
+            if closed & wanted:
+                clauses.append(Lead.stage_id.in_(stage_ids))
+            else:
+                # A stageless lead is open, so "open" must include it — the
+                # same NULL trap the ownership check has to sidestep.
+                clauses.append(or_(Lead.stage_id.is_(None), Lead.stage_id.in_(stage_ids)))
+        return clauses
+
     async def search_leads(
         self,
         *,
@@ -518,6 +576,7 @@ class LeadService:
         clause: Any = None,
         search: str | None = None,
         sort: str = "-created_at",
+        quick: QuickFilters | None = None,
     ) -> tuple[Sequence[Lead], int]:
         """The list endpoint's query: filter, search, sort, paginate.
 
@@ -529,6 +588,8 @@ class LeadService:
             statement = statement.where(visibility)
         if clause is not None:
             statement = statement.where(clause)
+        for quick_clause in self._quick_filter_clauses(quick or QuickFilters()):
+            statement = statement.where(quick_clause)
         if search:
             await self._load_schema()
             compiler = FilterCompiler(

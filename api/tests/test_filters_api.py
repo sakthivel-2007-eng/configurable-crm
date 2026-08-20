@@ -15,6 +15,7 @@ never shares a lead.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from typing import Any
 
 import pytest
@@ -25,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.factories import WorkspaceFixture, add_member, build_workspace, login
 
 from app.auth.passwords import PasswordHasherService
-from app.models.lead import Action
+from app.models.lead import Action, Lead
 
 pytestmark = pytest.mark.integration
 
@@ -86,6 +87,24 @@ async def _search(
     response = await api.post(ws.path("/leads/search"), headers=headers, json=body)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+async def _stages(
+    api: AsyncClient, ws: WorkspaceFixture, headers: dict[str, str]
+) -> dict[str, str]:
+    """The workspace's pipeline, by structural kind rather than by label.
+
+    Keyed on `initial`/`won`/`lost` because a test must not depend on what the
+    workspace happens to call them — that is the customer's choice.
+    """
+    response = await api.get(ws.path("/settings/stages"), headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return {
+        "initial": body["initial"]["id"],
+        "won": body["won"]["id"],
+        "lost": body["lost"]["id"],
+    }
 
 
 def _ids(page: dict) -> set[str]:
@@ -885,3 +904,122 @@ async def test_saving_a_layout_twice_updates_rather_than_duplicating(
     )
     assert second.status_code == 200, second.text
     assert second.json()["columns"] == ["rating"]
+
+
+# --- quick filters -----------------------------------------------------------
+#
+# Stage and assignee are columns on `leads`, not workspace-defined fields, so
+# §6.1's field rule cannot reach them — a rule references `lead_fields.key` by
+# definition. They are also the two filters every CRM user reaches for first,
+# which is why the API contract gives the list endpoint quick filters *beside*
+# the DSL rather than folding them into it.
+
+
+async def test_quick_filter_by_stage(api: AsyncClient, workspace: WorkspaceFixture) -> None:
+    headers = await _admin(api, workspace)
+    stages = await _stages(api, workspace, headers)
+
+    won = await _lead(api, workspace, headers, name="Won", phone="9500000001")
+    await _lead(api, workspace, headers, name="Open", phone="9500000002")
+    moved = await api.patch(
+        workspace.path(f"/leads/{won['id']}"), headers=headers, json={"stage_id": stages["won"]}
+    )
+    assert moved.status_code == 200, moved.text
+
+    page = (
+        await api.get(workspace.path("/leads"), headers=headers, params={"stage_id": stages["won"]})
+    ).json()
+    assert _ids(page) == {won["id"]}
+
+
+async def test_quick_filter_by_stage_kind_includes_stageless_leads(
+    api: AsyncClient, workspace: WorkspaceFixture, db_session: AsyncSession
+) -> None:
+    """ "Still open" must include a lead whose stage was deleted.
+
+    The same NULL trap the deactivation check has to sidestep: `stage_id NOT IN
+    (closed)` is NULL for a stageless lead, which is not TRUE, so it would drop
+    exactly the rows that most need chasing.
+    """
+    headers = await _admin(api, workspace)
+    stages = await _stages(api, workspace, headers)
+
+    open_lead = await _lead(api, workspace, headers, name="Open", phone="9510000001")
+    stageless = await _lead(api, workspace, headers, name="Stageless", phone="9510000002")
+    won = await _lead(api, workspace, headers, name="Won", phone="9510000003")
+    await api.patch(
+        workspace.path(f"/leads/{won['id']}"), headers=headers, json={"stage_id": stages["won"]}
+    )
+    await db_session.execute(
+        update(Lead).where(Lead.id == uuid.UUID(stageless["id"])).values(stage_id=None)
+    )
+    await db_session.commit()
+
+    page = (
+        await api.get(
+            workspace.path("/leads"),
+            headers=headers,
+            params=[("stage_kinds", "INITIAL"), ("stage_kinds", "ACTIVE")],
+        )
+    ).json()
+    assert _ids(page) == {open_lead["id"], stageless["id"]}
+
+
+async def test_quick_filter_by_assignee_and_unassigned(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    headers = await _admin(api, workspace)
+    rep = workspace.members["rep"]
+
+    assigned = await _lead(api, workspace, headers, name="Assigned", phone="9520000001")
+    unassigned = await _lead(api, workspace, headers, name="Nobody", phone="9520000002")
+    await api.patch(
+        workspace.path(f"/leads/{assigned['id']}"),
+        headers=headers,
+        json={"assignee_id": str(rep.membership.id)},
+    )
+
+    mine = (
+        await api.get(
+            workspace.path("/leads"),
+            headers=headers,
+            params={"assignee_id": str(rep.membership.id)},
+        )
+    ).json()
+    assert _ids(mine) == {assigned["id"]}
+
+    # A separate flag, because a query string cannot distinguish "no assignee
+    # given" from "explicitly nobody" — and those mean opposite things.
+    nobody = (
+        await api.get(workspace.path("/leads"), headers=headers, params={"unassigned": "true"})
+    ).json()
+    assert _ids(nobody) == {unassigned["id"]}
+
+
+async def test_quick_filters_combine_with_the_dsl(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """The two narrow together rather than one replacing the other."""
+    headers = await _admin(api, workspace)
+    await _field(api, workspace, headers, label="City", field_type="TEXT")
+    stages = await _stages(api, workspace, headers)
+
+    target = await _lead(api, workspace, headers, name="A", phone="9530000001", city="Chennai")
+    other = await _lead(api, workspace, headers, name="B", phone="9530000002", city="Chennai")
+    await _lead(api, workspace, headers, name="C", phone="9530000003", city="Delhi")
+
+    for lead_id in (target["id"], other["id"]):
+        await api.patch(
+            workspace.path(f"/leads/{lead_id}"),
+            headers=headers,
+            json={"stage_id": stages["won"] if lead_id == target["id"] else stages["initial"]},
+        )
+
+    page = await _search(
+        api,
+        workspace,
+        headers,
+        filter={"type": "field", "key": "city", "op": "eq", "value": "Chennai"},
+        stage_id=stages["won"],
+    )
+    assert _ids(page) == {target["id"]}

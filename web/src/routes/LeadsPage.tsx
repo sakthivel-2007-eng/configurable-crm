@@ -54,6 +54,8 @@ import { ColumnPicker } from '@/features/leads/ColumnPicker'
 import { LeadDetail } from '@/features/leads/LeadDetail'
 import { BUILTIN_COLUMN_IDS, DEFAULT_COLUMNS } from '@/features/leads/columns'
 import { LeadTable, Pagination } from '@/features/leads/LeadTable'
+import { QuickFilterBar } from '@/features/leads/QuickFilterBar'
+import { NO_QUICK_FILTERS, type QuickFilters } from '@/features/leads/quickFilters'
 import {
   useCustomActions,
   useDispositions,
@@ -82,12 +84,16 @@ function message(cause: unknown): string {
 }
 
 export function LeadsPage() {
-  const { activeWorkspaceId } = useAuth()
+  const { activeWorkspaceId, activeMembership } = useAuth()
   const workspaceId = activeWorkspaceId as string
+  // `MembershipSummary.id` is this caller's membership in the active
+  // workspace, which is what "assigned to me" means on a lead.
+  const myMembershipId = activeMembership?.id ?? null
 
   const [search, setSearch] = useState('')
   const [filterNode, setFilterNode] = useState<GroupNode>(emptyFilter)
   const [activeFilterId, setActiveFilterId] = useState<string | null>(null)
+  const [quick, setQuick] = useState<QuickFilters>(NO_QUICK_FILTERS)
   const [sort, setSort] = useState('-created_at')
   const [offset, setOffset] = useState(0)
   const [builderOpen, setBuilderOpen] = useState(false)
@@ -135,6 +141,9 @@ export function LeadsPage() {
     // columns on `leads` and always come back. Narrowing here is what keeps a
     // fifty-field workspace from shipping fifty values per row to draw four.
     columns: columns.filter((id) => !BUILTIN_COLUMN_IDS.has(id)),
+    stage_id: quick.stageId,
+    assignee_id: quick.mine ? myMembershipId : null,
+    unassigned: quick.unassigned,
   })
 
   // Any change to what is being asked returns the reader to the first page.
@@ -142,7 +151,7 @@ export function LeadsPage() {
   // after a filter change shows an empty table for a filter that matched.
   useEffect(() => {
     setOffset(0)
-  }, [search, filterNode, sort, activeFilterId])
+  }, [search, filterNode, sort, activeFilterId, quick])
 
   const allStages = useMemo(() => {
     const pipeline = stages.data
@@ -293,6 +302,8 @@ export function LeadsPage() {
           </CardContent>
         </Card>
       ) : null}
+
+      <QuickFilterBar stages={allStages} value={quick} onChange={setQuick} />
 
       <Card>
         <CardContent className="p-0">

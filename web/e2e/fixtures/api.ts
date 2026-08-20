@@ -644,6 +644,9 @@ export interface LastSearch {
   readonly q?: string | null
   readonly sort?: string
   readonly columns?: readonly string[] | null
+  readonly stage_id?: string | null
+  readonly assignee_id?: string | null
+  readonly unassigned?: boolean
 }
 
 const ERROR_MESSAGES: Record<string, string> = {

@@ -562,4 +562,14 @@ export interface LeadSearchRequest {
   readonly limit?: number
   readonly offset?: number
   readonly columns?: readonly string[] | null
+  /**
+   * Quick filters. Separate from `filter` because these are columns on
+   * `leads` — a DSL field rule references a workspace-defined field key by
+   * definition, so stage and assignee are out of its reach.
+   */
+  readonly stage_id?: string | null
+  readonly assignee_id?: string | null
+  readonly unassigned?: boolean
+  readonly rating?: number | null
+  readonly stage_kinds?: readonly StageKind[]
 }

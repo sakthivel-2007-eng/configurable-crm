@@ -17,7 +17,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, status
 
 from app.errors import api_error, not_found
-from app.models.enums import ChangesetSource, SystemActionKind, TemplateChannel
+from app.models.enums import ChangesetSource, StageKind, SystemActionKind, TemplateChannel
 from app.models.field import CustomActionType
 from app.models.lead import Changeset
 from app.models.pipeline import CallDisposition
@@ -34,7 +34,7 @@ from app.schemas.lead import (
     NoteCreate,
     TemplateRenderRequest,
 )
-from app.services.leads import LeadService
+from app.services.leads import LeadService, QuickFilters
 from app.services.templates import MessageTemplateService
 from app.tenancy.scoping import WorkspaceScope, require_workspace
 
@@ -82,13 +82,31 @@ async def list_leads(
     q: Annotated[str | None, Query(max_length=200)] = None,
     sort: Annotated[str, Query(max_length=80)] = "-created_at",
     columns: Annotated[list[str] | None, Query()] = None,
+    stage_id: Annotated[uuid.UUID | None, Query()] = None,
+    assignee_id: Annotated[uuid.UUID | None, Query()] = None,
+    unassigned: Annotated[bool, Query()] = False,
+    rating: Annotated[int | None, Query(ge=1, le=5)] = None,
+    stage_kinds: Annotated[list[StageKind] | None, Query()] = None,
 ) -> Page[dict[str, Any]]:
     """Architecture rule 6: the list endpoint never returns actions.
 
-    The quick path: search and sort, no filter document. Anything structured
-    goes to `POST /leads/search`, which speaks the same DSL a saved filter does.
+    The quick path: search, sort and the one-click filters. Anything structured
+    goes to `POST /leads/search`, which speaks the same DSL a saved filter does
+    and accepts the same quick filters alongside it.
     """
-    leads, total = await service.search_leads(limit=limit, offset=offset, search=q, sort=sort)
+    leads, total = await service.search_leads(
+        limit=limit,
+        offset=offset,
+        search=q,
+        sort=sort,
+        quick=QuickFilters(
+            stage_id=stage_id,
+            assignee_id=assignee_id,
+            unassigned=unassigned,
+            rating=rating,
+            stage_kinds=tuple(kind.value for kind in stage_kinds or ()),
+        ),
+    )
     return Page(
         items=[await service.project(lead, columns=columns) for lead in leads],
         total=total,
@@ -116,6 +134,13 @@ async def search_leads(
         clause=clause,
         search=payload.q,
         sort=payload.sort,
+        quick=QuickFilters(
+            stage_id=payload.stage_id,
+            assignee_id=payload.assignee_id,
+            unassigned=payload.unassigned,
+            rating=payload.rating,
+            stage_kinds=tuple(kind.value for kind in payload.stage_kinds),
+        ),
     )
     return Page(
         items=[await service.project(lead, columns=payload.columns) for lead in leads],

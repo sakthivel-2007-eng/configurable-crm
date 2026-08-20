@@ -17,6 +17,22 @@ Read `CLAUDE.md` and `03-configuration-model.md` first. Then this.
 Two defects are in `main` right now. Both are small to fix and both are the kind
 that get worse the longer they sit.
 
+> **Update, 21 Aug 2026 — both are fixed.** §0.1 in `4c07390`, §0.2 in `5f14730`.
+> The diagnoses below are left as written because they still explain *why* the
+> code looks the way it does; only the "Fix:" instructions are spent. Backend
+> suite is 381 green. Two things found while fixing §0.2 are worth carrying
+> forward, both now handled in `app/workers/indexing.py`:
+>
+> - `CREATE INDEX CONCURRENTLY` waits for **every** transaction older than
+>   itself. One client sitting idle-in-transaction stalls the build
+>   indefinitely rather than failing it. There is a `lock_timeout` on the build
+>   connection now, so a blocked build lands in `FAILED` where an admin can see
+>   it. The same rule bites in tests: a fixture holding an open transaction
+>   makes an index test *hang*, not fail.
+> - A failed build leaves the index behind marked `INVALID`, and the statement
+>   says `IF NOT EXISTS` — so without cleanup every retry would skip creation
+>   and report success over an index Postgres will not use.
+
 ### 0.1 `deactivate` no longer protects the pipeline — **fix this first**
 
 M1's headline guarantee is *"deactivating a member requires reassignment; never
@@ -474,8 +490,8 @@ These are the ones that have actually caused rework here.
 ## 10. Suggested order
 
 ```
-0.1 LeadOwnership          ~1h   correctness bug in shipped code
-0.2 indexed-field worker   ~4h   M6 depends on it
+0.1 LeadOwnership          done  4c07390
+0.2 indexed-field worker   done  5f14730
     demo seed (§8)         ~1d   M6's performance target depends on it
 M6  list + filters         8-10d
 M7  tasks, bulk, undo      7-9d

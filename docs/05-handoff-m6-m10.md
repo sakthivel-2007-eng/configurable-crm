@@ -502,6 +502,51 @@ Then click a cell showing N and confirm the list says exactly N.
 
 ## 7. M10 — Intake and event bus *(5–7 days)*
 
+> **Update, 21 Aug 2026 — M10 has landed, ahead of M9.** `324a755` (backend),
+> `90056ef` (frontend), `cb893a2` (a defect found in live verification).
+> Revision `0009_m10_intake`. 632 backend tests, 117 Playwright.
+>
+> Taken out of order deliberately: the event bus is the seam the planned
+> voice-agent integration attaches to (`docs/06-voice-integration-contract.md`
+> §2), it is the shorter of the two remaining milestones, and M9's dashboards
+> depend on nothing in it. **M9 is now the only milestone left before M11.**
+>
+> Acceptance verified live against a real HTTP consumer computing HMACs
+> independently: a delivery refused with 500 and recorded FAILED with backoff;
+> the row then left in `DELIVERING` holding a claim its worker could never
+> refresh; a later pass reclaimed and delivered it; the consumer saw the **same
+> `event_id` on both deliveries** and verified the signature against the real
+> secret. An unknown field posted through intake arrived in the payload, having
+> been accepted, stored and warned about.
+>
+> Six things this milestone settled that the section below does not say:
+>
+> - **The claim is committed before the HTTP call.** That is the whole recovery
+>   mechanism — a process that dies during the request leaves a `DELIVERING`
+>   row with a stale `claimed_at`, and any claim older than five minutes is
+>   reclaimed. No coordination, no leader election, just a timeout only a live
+>   worker can beat.
+> - **Delivery is at-least-once on purpose.** A worker can die after the
+>   consumer accepted and before the commit. That is why `event_id` is stable
+>   across retries; at-most-once loses events, and a lost lead event is worse
+>   than a duplicate.
+> - **Publishing lives in `ActionWriter`, not at call sites.** Every mutation
+>   already writes an action, so the event rides the same chokepoint and bulk
+>   edits, imports and undo all publish without knowing the bus exists.
+>   Subscriptions load in `open_changeset`, which is already async and always
+>   called, so `_append` stays synchronous.
+> - **`httpx` was a dev-only dependency.** The dispatcher would have been an
+>   `ImportError` in production and nowhere else. Now a runtime dependency.
+> - **`run_dispatch` read ORM state after committing**, which only worked
+>   because every sessionmaker in the codebase sets `expire_on_commit=False`.
+>   The first script that did not crashed immediately. Fixed in `cb893a2` with
+>   a regression test that builds its session the naive way.
+> - **`/settings/webhooks/{id}/test` is the one synchronous outbound call.**
+>   Rule 8 exists so a *user's* action never depends on a third party being up;
+>   an operator asking "is my endpoint reachable" is not that, and an answer
+>   that arrived later in a log would not answer the question.
+
+
 ### The rule that is not negotiable
 
 **Unknown keys are accepted, stored, and returned in `warnings` — never

@@ -241,6 +241,29 @@ def upgrade() -> None:
     )
     op.create_index("tasks_ws_lead_idx", "tasks", ["workspace_id", "lead_id"], unique=False)
 
+    # Backfill the `tasks` capability group onto the templates that are meant
+    # to be able to do everything.
+    #
+    # `admin_access` grants everything in a group — but only for groups a
+    # template *names*, and Root and Admin were provisioned before M7 existed,
+    # so neither mentions `tasks`. Without this, every task endpoint answers 403
+    # in a workspace created before this migration, and Root is `is_readonly`,
+    # so an admin cannot even grant it to themselves.
+    #
+    # Idempotent, and deliberately narrow: it only touches templates that do not
+    # already carry the key, so a workspace that has customised its own is left
+    # alone.
+    op.execute(
+        """
+        UPDATE permission_templates
+           SET capabilities = jsonb_set(
+                   capabilities, '{tasks}', '{"admin_access": true}'::jsonb, true
+               )
+         WHERE name IN ('Root', 'Admin')
+           AND NOT (capabilities ? 'tasks')
+        """
+    )
+
 
 def downgrade() -> None:
     op.drop_index("tasks_ws_lead_idx", table_name="tasks")
@@ -260,3 +283,11 @@ def downgrade() -> None:
     op.drop_table("labels")
     op.execute("DROP TYPE IF EXISTS import_job_status")
     op.execute("DROP TYPE IF EXISTS import_job_kind")
+    op.execute(
+        """
+        UPDATE permission_templates
+           SET capabilities = capabilities - 'tasks'
+         WHERE name IN ('Root', 'Admin')
+           AND capabilities -> 'tasks' = '{"admin_access": true}'::jsonb
+        """
+    )

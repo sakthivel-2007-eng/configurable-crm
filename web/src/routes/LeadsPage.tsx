@@ -22,7 +22,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
-import { api, ApiError } from '@/api/client'
+import { ApiError, api, downloadFile } from '@/api/client'
 import type {
   GroupNode,
   LeadField,
@@ -55,6 +55,8 @@ import { LeadDetail } from '@/features/leads/LeadDetail'
 import { BUILTIN_COLUMN_IDS, DEFAULT_COLUMNS } from '@/features/leads/columns'
 import { LeadTable, Pagination } from '@/features/leads/LeadTable'
 import { QuickFilterBar } from '@/features/leads/QuickFilterBar'
+import { BulkEditDialog } from '@/features/work/BulkEditDialog'
+import { useBulkUpdate } from '@/features/work/api'
 import { NO_QUICK_FILTERS, type QuickFilters } from '@/features/leads/quickFilters'
 import {
   useCustomActions,
@@ -80,6 +82,10 @@ function message(cause: unknown): string {
   if (cause.code === 'duplicate_identity') return 'A lead with that identifier already exists.'
   if (cause.code === 'identity_required') return 'The workspace identity field needs a value.'
   if (cause.code === 'field_not_indexed') return cause.message
+  if (cause.code === 'export_not_permitted') {
+    return 'Your permission template does not allow exporting any field.'
+  }
+  if (cause.code === 'export_too_large') return cause.message
   return cause.message
 }
 
@@ -94,6 +100,14 @@ export function LeadsPage() {
   const [filterNode, setFilterNode] = useState<GroupNode>(emptyFilter)
   const [activeFilterId, setActiveFilterId] = useState<string | null>(null)
   const [quick, setQuick] = useState<QuickFilters>(NO_QUICK_FILTERS)
+  // Selection lives here rather than in the table so it survives paging.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkError, setBulkError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  // Separate from `error`: a completed bulk edit is good news, and showing
+  // it in the destructive colour reads as the edit having failed.
+  const [notice, setNotice] = useState<string | null>(null)
   const [sort, setSort] = useState('-created_at')
   const [offset, setOffset] = useState(0)
   const [builderOpen, setBuilderOpen] = useState(false)
@@ -118,6 +132,7 @@ export function LeadsPage() {
   const createFilter = useCreateFilter(workspaceId)
   const archiveFilter = useArchiveFilter(workspaceId)
   const createLead = useCreateLead(workspaceId)
+  const bulkUpdate = useBulkUpdate(workspaceId)
 
   const workspace = useQuery({
     queryKey: ['workspace', workspaceId],
@@ -240,6 +255,36 @@ export function LeadsPage() {
           <Button variant="outline" onClick={() => setColumnsOpen(true)}>
             Columns
           </Button>
+          <Button
+            variant="outline"
+            disabled={exporting}
+            onClick={() => {
+              void (async () => {
+                setError(null)
+                setNotice(null)
+                setExporting(true)
+                try {
+                  // Exports the same filter the list is showing, so "download
+                  // what I am looking at" is one action rather than a second
+                  // query to re-describe.
+                  const job = await api.post<{ job_id: string; row_count: number }>(
+                    `/workspaces/${workspaceId}/leads/export`,
+                    { filter: filterNode.children.length > 0 ? filterNode : null },
+                  )
+                  await downloadFile(
+                    `/workspaces/${workspaceId}/leads/export/${job.job_id}`,
+                    'leads.csv',
+                  )
+                } catch (cause) {
+                  setError(message(cause))
+                } finally {
+                  setExporting(false)
+                }
+              })()
+            }}
+          >
+            Export
+          </Button>
           <Button onClick={() => setCreateOpen(true)}>Add lead</Button>
         </div>
       </header>
@@ -247,6 +292,11 @@ export function LeadsPage() {
       {error ? (
         <p role="alert" className="text-destructive text-sm">
           {error}
+        </p>
+      ) : null}
+      {notice ? (
+        <p role="status" className="text-sm">
+          {notice}
         </p>
       ) : null}
       {results.error ? (
@@ -303,11 +353,39 @@ export function LeadsPage() {
         </Card>
       ) : null}
 
-      <QuickFilterBar stages={allStages} value={quick} onChange={setQuick} />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <QuickFilterBar stages={allStages} value={quick} onChange={setQuick} />
+        {selectedIds.size > 0 ? (
+          <div className="flex items-center gap-2">
+            <span className="text-sm">
+              {selectedIds.size} selected
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground ml-2 underline"
+                onClick={() => setSelectedIds(new Set())}
+              >
+                clear
+              </button>
+            </span>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBulkError(null)
+                setNotice(null)
+                setBulkOpen(true)
+              }}
+            >
+              Edit {selectedIds.size}
+            </Button>
+          </div>
+        ) : null}
+      </div>
 
       <Card>
         <CardContent className="p-0">
           <LeadTable
+            selected={selectedIds}
+            onSelectedChange={setSelectedIds}
             leads={results.data?.items ?? []}
             fields={fieldList}
             stages={allStages}
@@ -326,6 +404,34 @@ export function LeadsPage() {
           />
         </CardContent>
       </Card>
+
+      <BulkEditDialog
+        open={bulkOpen}
+        count={selectedIds.size}
+        fields={fieldList}
+        fieldTypes={fieldTypes.data ?? []}
+        stages={allStages}
+        members={members.data?.items ?? []}
+        pending={bulkUpdate.isPending}
+        error={bulkError}
+        onClose={() => setBulkOpen(false)}
+        onApply={(body) => {
+          void (async () => {
+            setBulkError(null)
+            try {
+              const result = await bulkUpdate.mutateAsync({
+                lead_ids: [...selectedIds],
+                ...body,
+              })
+              setBulkOpen(false)
+              setSelectedIds(new Set())
+              setNotice(`${result.summary}. Undo it from the edit report if that was wrong.`)
+            } catch (cause) {
+              setBulkError(message(cause))
+            }
+          })()
+        }}
+      />
 
       <ColumnPicker
         open={columnsOpen}

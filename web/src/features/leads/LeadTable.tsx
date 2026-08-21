@@ -23,6 +23,13 @@ import { toDisplayStringOr } from '@/lib/format'
 
 export interface LeadTableProps {
   readonly leads: readonly Lead[]
+  /**
+   * Selected row ids. Selection lives with the page rather than the table
+   * because it has to survive paging — an operator ticking their way through
+   * three pages before hitting "edit" would otherwise lose the first two.
+   */
+  readonly selected: ReadonlySet<string>
+  readonly onSelectedChange: (next: ReadonlySet<string>) => void
   readonly fields: readonly LeadField[]
   readonly stages: readonly Stage[]
   readonly members: readonly MemberDetail[]
@@ -51,9 +58,33 @@ export function LeadTable({
   columns,
   sort,
   indexedKeys,
+  selected,
+  onSelectedChange,
   onSortChange,
   onSelect,
 }: LeadTableProps) {
+  const pageIds = leads.map((lead) => lead.id)
+  const allOnPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
+
+  function toggle(id: string) {
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onSelectedChange(next)
+  }
+
+  function togglePage() {
+    const next = new Set(selected)
+    // Adds or removes only *this page* — the header box is about what is on
+    // screen, and silently clearing selections from other pages would lose
+    // work the operator did there.
+    for (const id of pageIds) {
+      if (allOnPageSelected) next.delete(id)
+      else next.add(id)
+    }
+    onSelectedChange(next)
+  }
+
   const fieldsByKey = useMemo(() => new Map(fields.map((field) => [field.key, field])), [fields])
   const membersById = useMemo(
     () => new Map(members.map((member) => [member.id, member])),
@@ -137,6 +168,14 @@ export function LeadTable({
         <thead>
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id} className="border-b text-left">
+              <th className="w-8 px-3 py-2">
+                <input
+                  type="checkbox"
+                  aria-label="Select every lead on this page"
+                  checked={allOnPageSelected}
+                  onChange={togglePage}
+                />
+              </th>
               {headerGroup.headers.map((header) => {
                 const id = header.column.id
                 const canSort = sortableColumn(id)
@@ -172,6 +211,14 @@ export function LeadTable({
               className="hover:bg-muted/50 cursor-pointer border-b last:border-0"
               onClick={() => onSelect(row.original.id)}
             >
+              <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  aria-label={`Select ${row.original.identity_value}`}
+                  checked={selected.has(row.original.id)}
+                  onChange={() => toggle(row.original.id)}
+                />
+              </td>
               {row.getVisibleCells().map((cell) => (
                 <td key={cell.id} className="px-3 py-2">
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}

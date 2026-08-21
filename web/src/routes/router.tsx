@@ -2,7 +2,9 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 
 import { AppLayout } from '@/routes/AppLayout'
 import { CustomActionsPage } from '@/routes/CustomActionsPage'
+import { EditReportPage } from '@/routes/EditReportPage'
 import { FieldSettingsPage } from '@/routes/FieldSettingsPage'
+import { ImportPage } from '@/routes/ImportPage'
 import { LeadsPage } from '@/routes/LeadsPage'
 import { LoginPage } from '@/routes/LoginPage'
 import { MembersPage } from '@/routes/MembersPage'
@@ -10,6 +12,7 @@ import { PermissionsPage } from '@/routes/PermissionsPage'
 import { PipelineSettingsPage } from '@/routes/PipelineSettingsPage'
 import { RequireAuth } from '@/routes/RequireAuth'
 import { SystemStatusPage } from '@/routes/SystemStatusPage'
+import { TasksPage } from '@/routes/TasksPage'
 import { TemplatesPage } from '@/routes/TemplatesPage'
 import { WorkspacePickerPage } from '@/routes/WorkspacePickerPage'
 
@@ -32,6 +35,9 @@ export const router = createBrowserRouter([
       // Leads is the landing page now that there is something to land on.
       { index: true, element: <Navigate to="/leads" replace /> },
       { path: 'leads', element: <LeadsPage /> },
+      { path: 'tasks', element: <TasksPage /> },
+      { path: 'import', element: <ImportPage /> },
+      { path: 'edit-report', element: <EditReportPage /> },
       { path: 'templates', element: <TemplatesPage /> },
       { path: 'members', element: <MembersPage /> },
       { path: 'settings/fields', element: <FieldSettingsPage /> },

@@ -435,6 +435,10 @@ export interface Changeset {
   readonly summary: string
   readonly lead_count: number
   readonly is_undone: boolean
+  readonly undone_at?: string | null
+  readonly undone_by_id?: string | null
+  /** Set when this changeset *is* an undo, naming what it reversed. */
+  readonly undo_of_id?: string | null
   readonly created_at: string
 }
 
@@ -572,4 +576,128 @@ export interface LeadSearchRequest {
   readonly unassigned?: boolean
   readonly rating?: number | null
   readonly stage_kinds?: readonly StageKind[]
+}
+
+// --- tasks, labels, undo and imports (M7) ------------------------------------
+
+/** `upcoming` and `late` are computed against the *workspace's* timezone. */
+export type TaskBucket = 'upcoming' | 'late' | 'done'
+
+export interface Task {
+  readonly id: string
+  readonly lead_id: string | null
+  readonly title: string
+  readonly notes: string | null
+  readonly due_at: string
+  readonly assignee_id: string | null
+  readonly completed_at: string | null
+  readonly completed_by_id: string | null
+  readonly created_at: string
+}
+
+export interface TaskCounts {
+  readonly upcoming: number
+  readonly late: number
+  readonly done: number
+}
+
+export interface Label {
+  readonly id: string
+  readonly name: string
+  readonly color: string | null
+  readonly sort_order: number
+  readonly is_archived: boolean
+}
+
+/**
+ * One value an undo would put back, and whether it still can.
+ *
+ * `expected` is what the changeset set; `current` is what the lead holds now.
+ * When they differ somebody has edited since, and reverting would discard
+ * their work — which is what `conflicted` means.
+ */
+export interface Reversal {
+  readonly target: string
+  readonly label: string
+  readonly revert_to: unknown
+  readonly expected: unknown
+  readonly current: unknown
+  readonly conflicted: boolean
+}
+
+export type UndoOutcome = 'REVERSIBLE' | 'CONFLICTED' | 'ALREADY_UNDONE' | 'DELETED'
+
+export interface LeadUndoPlan {
+  readonly lead_id: string
+  readonly identity_value: string
+  readonly outcome: UndoOutcome
+  readonly reversals: readonly Reversal[]
+}
+
+export interface UndoPreview {
+  readonly changeset_id: string
+  readonly summary: string
+  readonly is_undone: boolean
+  readonly counts: {
+    readonly total: number
+    readonly reversible: number
+    readonly conflicted: number
+    readonly deleted: number
+  }
+  readonly leads: readonly LeadUndoPlan[]
+}
+
+export interface UndoResult {
+  readonly undo_changeset_id: string
+  readonly undone_changeset_id: string
+  readonly leads_reverted: number
+  readonly leads_skipped: number
+  readonly skipped: readonly LeadUndoPlan[]
+}
+
+export type ImportJobKind = 'LEAD_IMPORT' | 'LEAD_UPDATE' | 'ACTION_IMPORT' | 'EXPORT'
+
+export type ImportJobStatus =
+  'UPLOADED' | 'MAPPED' | 'PREVIEWED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+
+/** What a dry run found, and later what the commit did. */
+export interface ImportResult {
+  readonly counts?: Record<string, number>
+  readonly total?: number
+  readonly errors?: ReadonlyArray<{
+    readonly row_number: number
+    readonly status: string
+    readonly identity: string | null
+    readonly message: string | null
+  }>
+  readonly errors_truncated?: boolean
+  readonly columns?: readonly string[]
+}
+
+export interface ImportJob {
+  readonly id: string
+  readonly kind: ImportJobKind
+  readonly status: ImportJobStatus
+  readonly filename: string
+  readonly source_columns: readonly string[]
+  readonly mapping: Record<string, string>
+  readonly options: Record<string, unknown>
+  readonly result: ImportResult
+  readonly row_count: number
+  readonly changeset_id: string | null
+  readonly error: string | null
+  readonly created_at: string
+}
+
+/** A field the caller may map a column onto. */
+export interface ImportableField {
+  readonly key: string
+  readonly label: string
+  readonly field_type: string
+}
+
+export interface DuplicateGroup {
+  readonly value: string
+  readonly lead_ids: readonly string[]
+  readonly identity_values: readonly string[]
 }

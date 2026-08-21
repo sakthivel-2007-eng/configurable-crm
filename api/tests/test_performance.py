@@ -49,6 +49,12 @@ P95_BUDGET_MS = 300.0
 #: §8 — "Bulk COPY; under 3 minutes".
 SEED_BUDGET_SECONDS = 180.0
 
+#: docs/02-api-contract.md §Dashboard and reports — "Budget: under 500ms on the
+#: demo workspace". Looser than a list page because a report aggregates every
+#: matching row rather than returning twenty of them, and a person waiting for a
+#: chart has different expectations from one waiting for a table.
+REPORT_BUDGET_MS = 500.0
+
 _LEADS = 50_000
 _SAMPLES = 15
 _PASSWORD = "PerfHarness123!"
@@ -214,6 +220,31 @@ async def test_the_demo_workspace_meets_its_latency_targets(
 
     assert not breached, (
         f"over the {P95_BUDGET_MS:.0f}ms p95 budget on {_LEADS:,} leads: {'; '.join(breached)}"
+    )
+
+    # --- M9: the reports, on the same 50k workspace --------------------------
+    # The handoff makes this non-negotiable: "Every report endpoint under 500ms
+    # on the demo workspace, with tests asserting it. If a query cannot hit
+    # that, precompute rather than shipping something slow."
+    report_shapes: list[tuple[str, Callable[[], Awaitable[Any]]]] = [
+        ("follow-ups", lambda: _get("/dashboard/follow-ups")),
+        ("leads by stage", lambda: _get("/dashboard/leads-by-stage")),
+        ("funnel", lambda: _get("/reports/funnel")),
+        ("activity", lambda: _get("/reports/activity")),
+        ("leaderboard", lambda: _get("/reports/leaderboard")),
+        # The generic pivot, over a field the fixture actually populates —
+        # grouping on a mostly-empty column would measure nothing.
+        ("breakdown by an indexed field", lambda: _get("/reports/breakdown?field_key=class")),
+    ]
+
+    slow: list[str] = []
+    for label, call in report_shapes:
+        _, p95 = await _measure(call)
+        if p95 >= REPORT_BUDGET_MS:
+            slow.append(f"{label}: p95 {p95:.0f}ms")
+
+    assert not slow, (
+        f"over the {REPORT_BUDGET_MS:.0f}ms report budget on {_LEADS:,} leads: {'; '.join(slow)}"
     )
 
 

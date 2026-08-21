@@ -18,6 +18,7 @@ from app.models.assignment import (
     SalesGroupMember,
     ScheduledReport,
 )
+from app.models.dashboard import Dashboard
 from app.models.enums import (
     ActionDirection,
     ActionFieldType,
@@ -90,6 +91,7 @@ __all__ = [
     "Changeset",
     "ChangesetSource",
     "CustomActionType",
+    "Dashboard",
     "DedupeMode",
     "FieldOption",
     "ImportJob",

@@ -415,14 +415,19 @@ async def test_a_caller_cannot_schedule_a_report(
 async def test_scheduling_an_unknown_report_type_is_refused(
     api: AsyncClient, ws: WorkspaceFixture
 ) -> None:
-    """M9 owns the catalogue; a schedule for a report that does not exist yet
-    would be a row that fails every morning."""
+    """A schedule for a report that does not exist is a row that fails every
+    morning, so the write path refuses it by name.
+
+    M8 shipped with `leads` alone and this test used `leaderboard`; M9 added the
+    reports, so the catalogue grew and the example had to move to something
+    genuinely absent. The check is the same one — it is the list that changed.
+    """
     response = await api.post(
         ws.path("/scheduled-reports"),
         headers=ws.owner.auth,
         json={
             "name": "Not yet",
-            "report_type": "leaderboard",
+            "report_type": "astrology",
             "cron": "0 9 * * *",
             "recipients": ["ops@example.com"],
         },

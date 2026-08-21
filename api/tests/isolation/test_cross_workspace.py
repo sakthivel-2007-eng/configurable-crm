@@ -431,6 +431,32 @@ _M8_BODIES: dict[str, dict[str, object]] = {
     },
 }
 
+# M9 — reports and dashboards. Every one of these is a *lead read* wearing an
+# aggregate's clothing, so a leak here is a leak of the numbers themselves —
+# and a total is often all somebody wanted.
+M9_COLLECTION_ROUTES: list[str] = [
+    "/dashboard/follow-ups",
+    "/dashboard/leads-by-stage",
+    "/dashboard/filter-stats",
+    "/reports/funnel",
+    "/reports/activity",
+    "/reports/leaderboard",
+    "/dashboards",
+    "/dashboards/widgets",
+]
+
+M9_ID_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/dashboards/{dashboard_id}"),
+    ("PATCH", "/dashboards/{dashboard_id}"),
+    ("DELETE", "/dashboards/{dashboard_id}"),
+    ("PUT", "/dashboards/{dashboard_id}/default"),
+]
+
+_M9_BODIES: dict[str, dict[str, object]] = {
+    "/dashboards/{dashboard_id}": {"name": "Renamed By An Outsider"},
+    "/dashboards": {"name": "Smuggled", "layout": []},
+}
+
 # M10 — the integration surface. Every id here is a capability: a webhook id
 # lets you redirect another workspace's events, an outbox id lets you replay
 # them, and an API key id lets you revoke somebody else's live integration.
@@ -901,6 +927,9 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(M10_ID_ROUTES)
     declared.update(("GET", route) for route in M10_COLLECTION_ROUTES)
     declared.update(M10_COLLECTION_WRITE_ROUTES)
+    declared.update(M9_ID_ROUTES)
+    declared.update(("GET", route) for route in M9_COLLECTION_ROUTES)
+    declared.update({("GET", "/reports/breakdown"), ("POST", "/dashboards")})
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

@@ -173,6 +173,13 @@ _CALLER_CAPS: dict[str, Any] = {
     },
     "calling": {"log_calls": True, "view_call_history": True},
     "tasks": {"view_tasks": True, "create_tasks": True, "complete_tasks": True},
+    # A caller's *own* numbers, and nothing more: no team reports, no
+    # leaderboard. Without this the View group below promises a personal
+    # dashboard that every dashboard endpoint refuses to serve — a
+    # contradiction that only became visible in M9, when something was finally
+    # gated on `reports`. Visibility already confines what they see to their
+    # own leads, so this grants a view of their own work, not of anyone else's.
+    "reports": {"view_reports": True},
     "view": {
         "lead": {"show_timeline": True, "show_tasks": True},
         "dashboard": {"show_personal_dashboard": True},

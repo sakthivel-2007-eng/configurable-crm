@@ -27,6 +27,7 @@ from app.routers import leads as leads_router
 from app.routers import members as members_router
 from app.routers import permission_templates as permission_templates_router
 from app.routers import pipeline as pipeline_router
+from app.routers import reports as reports_router
 from app.routers import routing as routing_router
 from app.routers import views as views_router
 from app.routers import work as work_router
@@ -124,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(work_router.router, prefix=tenant_prefix)
     app.include_router(routing_router.router, prefix=tenant_prefix)
     app.include_router(integrations_router.router, prefix=tenant_prefix)
+    app.include_router(reports_router.router, prefix=tenant_prefix)
     # Unscoped by path: the workspace comes from the API key, not the URL.
     app.include_router(intake_router.router, prefix=resolved.api_v1_prefix)
 

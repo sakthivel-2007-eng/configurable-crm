@@ -59,10 +59,13 @@ __all__ = [
     "validate_cron",
 ]
 
-#: The report catalogue M8 can render. M9 owns the rest and extends this — a
-#: schedule for a report that does not exist yet would be a row that fails
-#: every morning, so the write path refuses it.
-REPORT_TYPES: frozenset[str] = frozenset({"leads"})
+#: The report catalogue a schedule may name. M8 shipped `leads` alone and
+#: refused the rest by name; M9 added the reports, so this is now the same list
+#: `/reports/*` serves. A schedule for a report that does not exist would be a
+#: row that fails every morning, which is why the write path still checks.
+REPORT_TYPES: frozenset[str] = frozenset(
+    {"leads", "leaderboard", "activity", "funnel", "breakdown"}
+)
 
 #: A schedule is an email amplifier. Bounded so a typo cannot turn one row into
 #: a mailing list.

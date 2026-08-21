@@ -51,6 +51,10 @@ EXPECTED_REVISIONS = [
     # M10 lands before M9: the event bus is what the planned voice-agent
     # integration attaches to, and M9 depends on nothing in it.
     "0009_m10_intake",
+    # M9 after M10: Alembic cares about the chain, not the milestone
+    # numbers, and renumbering an applied revision is what CLAUDE.md
+    # forbids.
+    "0010_m9_dashboards",
 ]
 
 

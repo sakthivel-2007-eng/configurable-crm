@@ -123,6 +123,12 @@ M10_TABLES = {
     "intake_log",
 }
 
+# M9 closes §5.5. `scheduled_reports` shares that section but landed in M8,
+# because a schedule needs a scheduler and a dashboard does not. Built after
+# M10 — the event bus was the voice integration's dependency and dashboards
+# were nobody's.
+M9_TABLES = {"dashboards"}
+
 
 def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
     """No table exists before the milestone that owns it."""
@@ -136,6 +142,7 @@ def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> No
         | M7_TABLES
         | M8_TABLES
         | M10_TABLES
+        | M9_TABLES
     )
 
 

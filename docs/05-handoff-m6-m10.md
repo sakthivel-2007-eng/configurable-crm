@@ -459,6 +459,46 @@ second process.
 
 ## 6. M9 — Dashboards and reports *(6–8 days)*
 
+> **Update, 21 Aug 2026 — M9 has landed.** `033d4a8` (backend), `80fa95f`
+> (frontend). Revision `0010_m9_dashboards`. 665 backend tests, 131 Playwright.
+> **All milestones through M10 are now done; only M11 remains.**
+>
+> Acceptance verified live against the 50k Northwind Tutors workspace: a
+> dashboard bound to the Caller template, seen by a caller; and every one of the
+> seven stage cells checked against the filtered list behind it — all seven
+> agreeing exactly.
+>
+> Six things this milestone settled that the section below does not say:
+>
+> - **`leads-by-stage` and `funnel` take no date range.** A departure from the
+>   contract's blanket "all take from/to", because that and "the drill-through
+>   is exact" cannot both hold — the lead list cannot express "created between
+>   these dates". Windowing a pipeline also changes what it means: "leads
+>   created in the last 30 days that are now Won" is a cohort metric wearing a
+>   pipeline metric's clothes. The range still governs activity, the leaderboard
+>   and breakdowns.
+> - **The chart and the list disagreed, twice over.** `ReportService` restated
+>   the visibility rule instead of reusing it and dropped the "unassigned leads
+>   are visible to everyone" half; and the drill-through navigated to a URL the
+>   lead list never read. Both fixed — the rule is one function now, and
+>   `LeadsPage` seeds its quick filters from the query string. **Neither was
+>   caught by any test; both were caught by driving the real app.**
+> - **The Caller template promised a dashboard its capabilities forbade.** The
+>   View group has always had `show_personal_dashboard` while the Access groups
+>   named no `reports` capability, so every dashboard endpoint would 403 for a
+>   caller. Invisible until something was finally gated on `reports`. This is
+>   the third milestone running to find a gap of this shape — **check both
+>   halves when adding a capability.**
+> - **Colour was computed, not chosen.** The dataviz validator rejected a
+>   Won-green/Lost-red funnel at deutan ΔE 4.1. Every chart is one hue, because
+>   every chart plots one series whose job is magnitude.
+> - **Looking at the rendered page found three defects no test did**: a toggle
+>   that read as a column header, bars with no accessible name, and
+>   all-lowercase labels. Run the app; the suite does not have eyes.
+> - **`REPORT_TYPES` grew**, so a schedule can finally name something other than
+>   `leads`.
+
+
 **Read the `dataviz` skill before writing any chart code.** PROMPTS.md says so
 explicitly.
 
@@ -643,7 +683,7 @@ These are the ones that have actually caused rework here.
 M6  list + filters         done  3c6b2b4 · 231d845 · c7db934
 M7  tasks, bulk, undo      done  26b0e20 · 3b055ba · 9339ffa · 2958832
 M8  assignment, scheduler  done  8bd790e · 6ce7cdf · ef9ac65 · 799a258
-M9  dashboards, reports    6-8d
+M9  dashboards, reports    done  033d4a8 · 80fa95f
 M10 intake, outbox         5-7d
 ```
 

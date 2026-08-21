@@ -36,6 +36,7 @@ from app.models.pipeline import LostReason, Stage
 from app.models.workspace import Membership, Workspace
 from app.permissions.projection import FieldProjectionService, FieldWriteFilter
 from app.services.actions import ActionWriter, FieldDelta
+from app.services.assignment import AssignmentEngine
 from app.tenancy.session import ScopedSession
 
 __all__ = ["MAX_BULK_LEADS", "LeadService", "QuickFilters"]
@@ -93,6 +94,7 @@ class LeadService:
         self._sees_all = sees_all
         self._validator: ValueValidator | None = None
         self._fields: list[LeadField] = []
+        self._assignment: AssignmentEngine | None = None
 
     # --- setup -------------------------------------------------------------
 
@@ -231,6 +233,12 @@ class LeadService:
 
     # --- writes ------------------------------------------------------------
 
+    def assignment_engine(self) -> AssignmentEngine:
+        """The rule engine, built once per service so an import reuses it."""
+        if self._assignment is None:
+            self._assignment = AssignmentEngine(self._session, workspace=self._workspace)
+        return self._assignment
+
     async def create_lead(
         self,
         *,
@@ -238,8 +246,16 @@ class LeadService:
         stage_id: uuid.UUID | None = None,
         assignee_id: uuid.UUID | None = None,
         rating: int | None = None,
+        apply_assignment_rules: bool = True,
     ) -> tuple[Lead, ActionWriter]:
-        """Create a lead, its changeset and its `LEAD_CREATED` action together."""
+        """Create a lead, its changeset and its `LEAD_CREATED` action together.
+
+        Assignment rules run here rather than in the router, because *every*
+        create path lands in this method — UI, import, and M10's intake API.
+        The spec asks for one implementation called from three places; this
+        is the one place. An explicit `assignee_id` wins over the rules: a
+        person naming a rep is a decision, not a default to be overridden.
+        """
         validator = await self._load_schema()
         identity_key = await self._identity_key()
 
@@ -279,6 +295,16 @@ class LeadService:
         self._refresh_search_vector(lead)
         await self._session.flush()
 
+        # After the flush: the engine evaluates rules as SQL against this lead's
+        # row, so the row has to exist in the transaction first.
+        routed_to: uuid.UUID | None = None
+        if assignee_id is None and apply_assignment_rules:
+            outcome = await self.assignment_engine().decide(lead)
+            if outcome.membership_id is not None:
+                lead.assignee_id = outcome.membership_id
+                routed_to = outcome.membership_id
+                await self._session.flush()
+
         writer = ActionWriter(self._session, actor_id=self._actor_id)
         await writer.open_changeset(
             source=ChangesetSource.SINGLE_EDIT,
@@ -286,8 +312,11 @@ class LeadService:
             lead_count=1,
         )
         writer.record_created(lead)
-        if assignee_id is not None:
-            writer.record_assignment_change(lead, old_assignee_id=None, new_assignee_id=assignee_id)
+        new_assignee = assignee_id if assignee_id is not None else routed_to
+        if new_assignee is not None:
+            writer.record_assignment_change(
+                lead, old_assignee_id=None, new_assignee_id=new_assignee
+            )
         await self._session.flush()
         return lead, writer
 

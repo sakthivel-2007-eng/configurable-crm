@@ -368,6 +368,52 @@ M7_COLLECTION_ROUTES: list[str] = [
     "/tasks/counts",
 ]
 
+# M8 — routing configuration and the distribution write. Both id-bearing
+# resources are settings, so a leaked id would let one workspace rewrite
+# another's lead routing; `/leads/distribute` is the write that would act on it.
+M8_GROUP_ROUTES: list[tuple[str, str]] = [
+    ("PATCH", "/settings/sales-groups/{group_id}"),
+    ("DELETE", "/settings/sales-groups/{group_id}"),
+    ("GET", "/settings/sales-groups/{group_id}/members"),
+    ("PUT", "/settings/sales-groups/{group_id}/members"),
+]
+
+M8_RULE_ROUTES: list[tuple[str, str]] = [
+    ("PATCH", "/settings/assignment-rules/{rule_id}"),
+    ("DELETE", "/settings/assignment-rules/{rule_id}"),
+]
+
+M8_COLLECTION_ROUTES: list[str] = [
+    "/settings/sales-groups",
+    "/settings/assignment-rules",
+]
+
+M8_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/settings/sales-groups"),
+    ("POST", "/settings/assignment-rules"),
+    ("PATCH", "/settings/assignment-rules/reorder"),
+    ("POST", "/settings/assignment-rules/preview"),
+    ("POST", "/leads/distribute"),
+]
+
+_M8_BODIES: dict[str, dict[str, object]] = {
+    "/settings/sales-groups/{group_id}": {"name": "Renamed By An Outsider"},
+    "/settings/sales-groups": {"name": "Smuggled"},
+    "/settings/assignment-rules/{rule_id}": {"name": "Renamed By An Outsider"},
+    "/settings/assignment-rules": {
+        "name": "Smuggled",
+        "strategy": "UNASSIGNED",
+        "config": {},
+    },
+    "/settings/assignment-rules/reorder": {"order": ["00000000-0000-4000-8000-000000000001"]},
+    "/settings/assignment-rules/preview": {},
+    "/leads/distribute": {
+        "lead_ids": ["00000000-0000-4000-8000-000000000001"],
+        "strategy": "UNASSIGNED",
+        "config": {},
+    },
+}
+
 _M7_BODIES: dict[str, dict[str, object]] = {
     "/changesets/{changeset_id}/undo": {"skip_conflicts": True},
     "/changesets/{changeset_id}/preview-undo": {},
@@ -792,6 +838,10 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(("GET", route) for route in M7_LEAD_CHILD_ROUTES)
     declared.update(("GET", route) for route in M7_COLLECTION_ROUTES)
     declared.update({("POST", "/tasks"), ("POST", "/labels"), ("POST", "/imports")})
+    declared.update(M8_GROUP_ROUTES)
+    declared.update(M8_RULE_ROUTES)
+    declared.update(("GET", route) for route in M8_COLLECTION_ROUTES)
+    declared.update(M8_COLLECTION_WRITE_ROUTES)
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

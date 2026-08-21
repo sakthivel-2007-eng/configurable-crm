@@ -102,11 +102,29 @@ M7_TABLES = {
     "import_jobs",
 }
 
+# M8 owns §5.2, §5.3 and the scheduled half of §5.5. `dashboards` shares §5.5
+# but belongs to M9 — a dashboard is composed and read, a scheduled report is
+# rendered and mailed, and only the second needs a scheduler.
+M8_TABLES = {
+    "sales_groups",
+    "sales_group_members",
+    "assignment_rules",
+    "assignment_cursors",
+    "scheduled_reports",
+}
+
 
 def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
     """No table exists before the milestone that owns it."""
     assert set(Base.metadata.tables) == (
-        M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES | M7_TABLES
+        M1_TABLES
+        | M2_TABLES
+        | M3_TABLES
+        | M4_TABLES
+        | M5_TABLES
+        | M6_TABLES
+        | M7_TABLES
+        | M8_TABLES
     )
 
 

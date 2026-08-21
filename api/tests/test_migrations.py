@@ -47,6 +47,7 @@ EXPECTED_REVISIONS = [
     "0005_m5_leads",
     "0006_m6_filters",
     "0007_m7_work",
+    "0008_m8_assignment",
 ]
 
 
@@ -136,6 +137,12 @@ async def test_no_enum_in_the_database_encodes_business_taxonomy(
         # anything a customer would recognise as their vocabulary.
         "import_job_kind",
         "import_job_status",
+        # M8 — *how* a rule chooses a member, never *who* it chooses. The
+        # members, groups and field values every strategy reads are rows; this
+        # names only the six ways of picking among them.
+        "assignment_strategy",
+        # M8 — the attachment format a scheduled report is mailed as.
+        "scheduled_report_format",
     }
 
     # And the harder check: no enum *value* anywhere names a business concept.

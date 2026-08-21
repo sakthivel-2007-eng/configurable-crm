@@ -48,6 +48,9 @@ EXPECTED_REVISIONS = [
     "0006_m6_filters",
     "0007_m7_work",
     "0008_m8_assignment",
+    # M10 lands before M9: the event bus is what the planned voice-agent
+    # integration attaches to, and M9 depends on nothing in it.
+    "0009_m10_intake",
 ]
 
 
@@ -143,6 +146,11 @@ async def test_no_enum_in_the_database_encodes_business_taxonomy(
         "assignment_strategy",
         # M8 — the attachment format a scheduled report is mailed as.
         "scheduled_report_format",
+        # M10 — where one outbound delivery has got to, and what one inbound
+        # request did. Both describe the product's own plumbing; neither names
+        # anything a customer would recognise as their vocabulary.
+        "outbox_status",
+        "intake_outcome",
     }
 
     # And the harder check: no enum *value* anywhere names a business concept.

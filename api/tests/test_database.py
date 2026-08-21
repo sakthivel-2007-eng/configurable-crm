@@ -113,6 +113,16 @@ M8_TABLES = {
     "scheduled_reports",
 }
 
+# M10 completes §6's list. Landed before M9 because the event bus is the seam
+# the planned voice-agent integration attaches to, and dashboards depend on
+# nothing here.
+M10_TABLES = {
+    "api_keys",
+    "webhook_endpoints",
+    "outbox_events",
+    "intake_log",
+}
+
 
 def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
     """No table exists before the milestone that owns it."""
@@ -125,6 +135,7 @@ def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> No
         | M6_TABLES
         | M7_TABLES
         | M8_TABLES
+        | M10_TABLES
     )
 
 

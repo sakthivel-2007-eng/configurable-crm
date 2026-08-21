@@ -431,6 +431,43 @@ _M8_BODIES: dict[str, dict[str, object]] = {
     },
 }
 
+# M10 — the integration surface. Every id here is a capability: a webhook id
+# lets you redirect another workspace's events, an outbox id lets you replay
+# them, and an API key id lets you revoke somebody else's live integration.
+M10_ID_ROUTES: list[tuple[str, str]] = [
+    ("DELETE", "/settings/api-keys/{key_id}"),
+    ("PATCH", "/settings/webhooks/{endpoint_id}"),
+    ("DELETE", "/settings/webhooks/{endpoint_id}"),
+    ("POST", "/settings/webhooks/{endpoint_id}/test"),
+    ("POST", "/settings/outbox/{event_id}/retry"),
+]
+
+M10_COLLECTION_ROUTES: list[str] = [
+    "/settings/api-keys",
+    "/settings/webhooks",
+    "/settings/webhooks/events",
+    "/settings/outbox",
+    "/settings/intake-log",
+]
+
+M10_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/settings/api-keys"),
+    ("POST", "/settings/webhooks"),
+]
+
+_M10_BODIES: dict[str, dict[str, object]] = {
+    "/settings/webhooks/{endpoint_id}": {"name": "Renamed By An Outsider"},
+    "/settings/webhooks": {
+        "name": "Smuggled",
+        "url": "https://attacker.example.com/hook",
+        "permission_template_id": "00000000-0000-4000-8000-000000000001",
+    },
+    "/settings/api-keys": {
+        "name": "Smuggled",
+        "permission_template_id": "00000000-0000-4000-8000-000000000001",
+    },
+}
+
 _M7_BODIES: dict[str, dict[str, object]] = {
     "/changesets/{changeset_id}/undo": {"skip_conflicts": True},
     "/changesets/{changeset_id}/preview-undo": {},
@@ -861,6 +898,9 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(M8_COLLECTION_WRITE_ROUTES)
     declared.update(M8_SCHEDULE_ROUTES)
     declared.update({("GET", "/recurring-dates/occurrences")})
+    declared.update(M10_ID_ROUTES)
+    declared.update(("GET", route) for route in M10_COLLECTION_ROUTES)
+    declared.update(M10_COLLECTION_WRITE_ROUTES)
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

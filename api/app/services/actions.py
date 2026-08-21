@@ -25,13 +25,14 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import func, select
 
 from app.errors import api_error
 from app.models.enums import ChangesetSource, SystemActionKind
 from app.models.field import CustomActionType
+from app.models.integration import OutboxEvent, WebhookEndpoint
 from app.models.lead import Action, Changeset, Lead
 from app.tenancy.session import ScopedSession
 
@@ -73,6 +74,10 @@ class ActionWriter:
         self._session = session
         self._actor_id = actor_id
         self._changeset: Changeset | None = None
+        #: Endpoints subscribed in this workspace, loaded once in
+        #: `open_changeset`. Held so `_append` can queue outbound events
+        #: synchronously — see `_publish`.
+        self._endpoints: list[WebhookEndpoint] = []
 
     # --- changesets --------------------------------------------------------
 
@@ -94,6 +99,19 @@ class ActionWriter:
         self._session.add(changeset)
         await self._session.flush()
         self._changeset = changeset
+
+        # Load subscriptions now, while we are still in an async context. This
+        # is what lets `_append` queue events without being async itself, and
+        # therefore what makes publishing unforgettable rather than something
+        # every call site has to remember (rule 8, and the same reasoning as
+        # rule 5a's changesets).
+        rows = await self._session.execute(
+            select(WebhookEndpoint).where(
+                WebhookEndpoint.workspace_id == self._session.workspace_id,
+                WebhookEndpoint.is_active.is_(True),
+            )
+        )
+        self._endpoints = list(rows.scalars().all())
         return changeset
 
     @property
@@ -140,7 +158,67 @@ class ActionWriter:
             lead.last_action_at is None or action.performed_at > lead.last_action_at
         ):
             lead.last_action_at = action.performed_at
+
+        self._publish(lead, action)
         return action
+
+    # --- outbound events ---------------------------------------------------
+
+    #: Which timeline event becomes which outbound event (§Outbound). Anything
+    #: not named here is an ordinary timeline entry and rides `action.created`.
+    _EVENT_FOR_KIND: ClassVar[dict[SystemActionKind, str]] = {
+        SystemActionKind.LEAD_CREATED: "lead.created",
+        SystemActionKind.FIELD_CHANGE: "lead.field_changed",
+        SystemActionKind.STAGE_CHANGE: "lead.stage_changed",
+        SystemActionKind.ASSIGNMENT_CHANGE: "lead.assigned",
+        SystemActionKind.RATING_CHANGE: "lead.updated",
+        SystemActionKind.TASK_CREATED: "task.created",
+        SystemActionKind.TASK_COMPLETED: "task.completed",
+    }
+
+    def _publish(self, lead: Lead, action: Action) -> None:
+        """Queue this action's outbound event, in the same transaction.
+
+        Written here rather than at each call site for the same reason actions
+        themselves are: there is one place a mutation passes through, so there
+        is one place the event can be missed, and it is this one.
+
+        Costs nothing in a workspace with no integrations — `_endpoints` is
+        empty and this returns immediately.
+        """
+        if not self._endpoints:
+            return
+
+        event = self._EVENT_FOR_KIND.get(action.kind, "action.created")
+        data = {
+            "lead_id": str(lead.id),
+            "identity_value": lead.identity_value,
+            "stage_id": str(lead.stage_id) if lead.stage_id else None,
+            "assignee_id": str(lead.assignee_id) if lead.assignee_id else None,
+            "action_kind": action.kind.value,
+            "actor_id": str(self._actor_id) if self._actor_id else None,
+            "changeset_id": str(self.changeset.id),
+            # Unprojected. The dispatcher projects per endpoint at delivery, so
+            # a row queued before a permission was revoked still respects it.
+            "values": dict(lead.values or {}),
+            "payload": dict(action.payload or {}),
+        }
+
+        for endpoint in self._endpoints:
+            # An empty subscription list means everything — the useful default
+            # for somebody wiring up their first integration.
+            if endpoint.events and event not in endpoint.events:
+                continue
+            self._session.add(
+                OutboxEvent(
+                    event=event,
+                    event_id=uuid.uuid4(),
+                    endpoint_id=endpoint.id,
+                    payload=data,
+                    occurred_at=action.performed_at or dt.datetime.now(dt.UTC),
+                    next_attempt_at=action.performed_at or dt.datetime.now(dt.UTC),
+                )
+            )
 
     def record_created(self, lead: Lead) -> Action:
         return self._append(lead, kind=SystemActionKind.LEAD_CREATED)

@@ -18,10 +18,13 @@ __all__ = [
     "AssignmentStrategy",
     "AvailabilityStatus",
     "ChangesetSource",
+    "DedupeMode",
     "ImportJobKind",
     "ImportJobStatus",
     "IndexedFieldStatus",
+    "IntakeOutcome",
     "LeadFieldType",
+    "OutboxStatus",
     "PermissionGrant",
     "SavedFilterVisibility",
     "ScheduledReportFormat",
@@ -256,3 +259,43 @@ class ScheduledReportFormat(enum.StrEnum):
 
     CSV = "CSV"
     XLSX = "XLSX"
+
+
+class DedupeMode(enum.StrEnum):
+    """What intake does when the identity already exists (§Intake).
+
+    A product concept: three answers to one question, none of them anything a
+    customer names.
+    """
+
+    #: Merge non-null values onto the existing lead. Never blanks what is there.
+    UPDATE = "UPDATE"
+    #: Leave the existing lead untouched and report it.
+    SKIP = "SKIP"
+    #: Deliberately create a second lead. Refused when the workspace's identity
+    #: field is unique, which it always is — kept so the API can say *why*
+    #: rather than silently doing something else.
+    CREATE_DUPLICATE = "CREATE_DUPLICATE"
+
+
+class OutboxStatus(enum.StrEnum):
+    """Where one outbound delivery has got to (§Outbound)."""
+
+    PENDING = "PENDING"
+    #: Claimed by a worker. A row stuck here after a crash is retried, not lost.
+    DELIVERING = "DELIVERING"
+    DELIVERED = "DELIVERED"
+    #: Failed, will be retried at `next_attempt_at`.
+    FAILED = "FAILED"
+    #: Out of attempts. Never retried automatically; an operator redrives it.
+    DEAD = "DEAD"
+
+
+class IntakeOutcome(enum.StrEnum):
+    """What one intake request did. Rejections are logged too (§Intake)."""
+
+    CREATED = "CREATED"
+    UPDATED = "UPDATED"
+    #: Matched an existing lead and `dedupe` said to leave it alone.
+    SKIPPED = "SKIPPED"
+    REJECTED = "REJECTED"

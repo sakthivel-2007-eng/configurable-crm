@@ -21,6 +21,8 @@ from app.db import create_engine, create_session_factory
 from app.routers import auth as auth_router
 from app.routers import fields as fields_router
 from app.routers import health as health_router
+from app.routers import intake as intake_router
+from app.routers import integrations as integrations_router
 from app.routers import leads as leads_router
 from app.routers import members as members_router
 from app.routers import permission_templates as permission_templates_router
@@ -121,6 +123,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(views_router.router, prefix=tenant_prefix)
     app.include_router(work_router.router, prefix=tenant_prefix)
     app.include_router(routing_router.router, prefix=tenant_prefix)
+    app.include_router(integrations_router.router, prefix=tenant_prefix)
+    # Unscoped by path: the workspace comes from the API key, not the URL.
+    app.include_router(intake_router.router, prefix=resolved.api_v1_prefix)
 
     return app
 

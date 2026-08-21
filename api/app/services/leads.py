@@ -95,6 +95,7 @@ class LeadService:
         self._validator: ValueValidator | None = None
         self._fields: list[LeadField] = []
         self._assignment: AssignmentEngine | None = None
+        self._last_validation: Any = None
 
     # --- setup -------------------------------------------------------------
 
@@ -119,6 +120,41 @@ class LeadService:
                 options_by_field=grouped,
             )
         return self._validator
+
+    async def identity_key(self) -> str:
+        """The workspace's identity field key. Public for M10's intake path.
+
+        Intake has to resolve identity exactly the way the UI does — otherwise a
+        lead posted by a form and the same lead typed by a person would not be
+        the same lead.
+        """
+        return await self._identity_key()
+
+    async def normalise_identity(self, raw: str) -> str | None:
+        """Run a raw identity through the same validator the write path uses.
+
+        The stored `identity_value` is normalised (phone digits, the workspace's
+        country code), so matching against the raw string would miss every
+        existing lead and turn an update into a duplicate.
+        """
+        validator = await self._load_schema()
+        key = await self._identity_key()
+        try:
+            validated = validator.validate({key: raw}, is_create=False)
+        except FieldValidationError:
+            return None
+        value = validated.values.get(key)
+        return str(value) if value not in (None, "") else None
+
+    @property
+    def last_validation(self) -> Any:
+        """The last `ValidatedValues` this service produced, or None.
+
+        Exists so intake can report unknown keys and quarantined templates. Both
+        are *accepted* rather than refused, so without this they would be
+        invisible — a field quietly not arriving, with no trace.
+        """
+        return self._last_validation
 
     async def _identity_key(self) -> str:
         """The key of the field this workspace identifies leads by.
@@ -263,6 +299,7 @@ class LeadService:
 
         try:
             validated = validator.validate(dict(values), is_create=True)
+            self._last_validation = validated
         except FieldValidationError as exc:
             raise api_error(
                 422, "invalid_values", "One or more values are invalid", fields=exc.errors

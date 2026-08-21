@@ -31,6 +31,10 @@ dependencies = [
     # `arq` is the background worker in CLAUDE.md's stack table. M8 is the first
     # milestone that needs a process rather than a function call.
     "arq>=0.26.0",
+    # M10 delivers webhooks from the worker. Previously a dev-only dependency
+    # for the test client, which would have made the dispatcher an ImportError
+    # in production and nowhere else.
+    "httpx>=0.28.0",
 ]
 
 [dependency-groups]
@@ -38,7 +42,6 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
-    "httpx>=0.28.0",
     "testcontainers[postgres]>=4.9.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",

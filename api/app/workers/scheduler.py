@@ -4,7 +4,9 @@ The first milestone that needs a *process* rather than a function call. M6's
 index builds are invoked directly by the settings service; this extends that
 module's home rather than standing up a second worker, as the handoff asks.
 
-One cron entry, ticking every minute. It walks workspaces and asks each one
+Two cron entries. The scheduler ticks every minute; the outbox dispatcher runs
+more often than that, because a webhook that arrives a minute after the event is
+a webhook most integrations would call broken. It walks workspaces and asks each one
 whether any of its schedules is due **in that workspace's timezone** — the tick
 itself has no timezone, which is the point. A worker that evaluated cron in its
 own zone would be correct for exactly the customers who happen to share it.
@@ -26,12 +28,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import get_settings
+from app.events.dispatcher import HttpxTransport, run_dispatch
 from app.models import Workspace
 from app.services.email import build_sender
 from app.services.scheduling import run_due_schedules
 from app.tenancy.session import ScopedSession
 
-__all__ = ["WorkerSettings", "tick"]
+__all__ = ["WorkerSettings", "dispatch", "tick"]
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +83,26 @@ async def tick(ctx: dict[str, Any]) -> dict[str, int]:
     return totals
 
 
+async def dispatch(ctx: dict[str, Any]) -> dict[str, int]:
+    """One outbox pass.
+
+    Runs on its own cron rather than inside `tick`, so a slow SMTP server cannot
+    delay webhook delivery and a dead consumer cannot delay the morning reports.
+    """
+    session_factory: async_sessionmaker[Any] = ctx["session_factory"]
+    async with session_factory() as raw:
+        return await run_dispatch(
+            raw, transport=ctx["webhook_transport"], now=dt.datetime.now(dt.UTC)
+        )
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_size=2, max_overflow=2)
     ctx["engine"] = engine
     ctx["session_factory"] = async_sessionmaker(engine, expire_on_commit=False)
     ctx["email_sender"] = build_sender(settings)
+    ctx["webhook_transport"] = HttpxTransport()
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -99,7 +116,13 @@ class WorkerSettings:
 
     # `arq` reads these off the class; they are configuration, not state.
     functions: ClassVar[list[Any]] = []
-    cron_jobs: ClassVar[list[Any]] = [cron(tick, minute=set(range(60)), run_at_startup=False)]
+    cron_jobs: ClassVar[list[Any]] = [
+        cron(tick, minute=set(range(60)), run_at_startup=False),
+        # Every 10 seconds. The claim query is a partial-index lookup that
+        # returns nothing in the common case, so a quiet workspace pays almost
+        # nothing for delivery that feels immediate when it is not quiet.
+        cron(dispatch, second={0, 10, 20, 30, 40, 50}, run_at_startup=False),
+    ]
     on_startup = startup
     on_shutdown = shutdown
 

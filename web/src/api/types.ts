@@ -701,3 +701,82 @@ export interface DuplicateGroup {
   readonly lead_ids: readonly string[]
   readonly identity_values: readonly string[]
 }
+
+// --- M8: routing and scheduling ---------------------------------------------
+
+export type AssignmentStrategy =
+  'ROUND_ROBIN' | 'WEIGHTED' | 'FIELD_VALUE' | 'SALES_GROUP' | 'FIXED' | 'UNASSIGNED'
+
+export interface SalesGroup {
+  readonly id: string
+  readonly name: string
+  readonly description: string | null
+  readonly is_archived: boolean
+}
+
+export interface SalesGroupMember {
+  readonly membership_id: string
+  /** A member on weight 3 is dealt three times per round-robin cycle. */
+  readonly weight: number
+}
+
+export interface AssignmentRule {
+  readonly id: string
+  readonly name: string
+  /** Lowest number wins. */
+  readonly priority: number
+  readonly strategy: AssignmentStrategy
+  /** Strategy-dependent; the server validates it against `strategy`. */
+  readonly config: Record<string, unknown>
+  /** The M6 filter DSL. `{}` is a catch-all. */
+  readonly conditions: Record<string, unknown>
+  readonly skip_unavailable: boolean
+  readonly is_active: boolean
+  readonly created_at: string
+}
+
+/** Why the engine decided what it decided. */
+export type AssignmentReason =
+  'matched' | 'no_rule_matched' | 'no_candidates' | 'rule_assigns_nobody'
+
+export interface AssignmentPreview {
+  readonly rule_id: string | null
+  readonly rule_name: string | null
+  readonly membership_id: string | null
+  readonly reason: AssignmentReason
+}
+
+export interface DistributionResult {
+  /** The undo handle. One redistribution is one changeset. */
+  readonly changeset_id: string | null
+  readonly assigned: number
+  /** Already with that member, so nothing was written. */
+  readonly skipped: number
+  readonly total: number
+}
+
+export type ScheduledReportFormat = 'CSV' | 'XLSX'
+
+export interface ScheduledReport {
+  readonly id: string
+  readonly name: string
+  readonly report_type: string
+  /** Five-field cron, evaluated in the workspace's timezone. */
+  readonly cron: string
+  readonly recipients: readonly string[]
+  readonly params: Record<string, unknown>
+  readonly format: ScheduledReportFormat
+  readonly is_active: boolean
+  readonly last_run_at: string | null
+  /** Surfaced so a broken schedule is visible instead of failing quietly. */
+  readonly last_error: string | null
+  /** Whose field permissions the render uses. Null means it cannot run. */
+  readonly created_by: string | null
+}
+
+export interface RecurringOccurrence {
+  readonly lead_id: string
+  readonly identity_value: string
+  readonly field_key: string
+  readonly occurs_on: string
+}

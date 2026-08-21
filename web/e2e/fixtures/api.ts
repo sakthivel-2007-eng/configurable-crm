@@ -621,6 +621,12 @@ export interface StubOptions {
   readonly undoPreview?: Record<string, unknown>
   /** When false, every task endpoint answers 403 insufficient_permissions. */
   readonly tasksAllowed?: boolean
+  /** When false, the assignment-rule endpoints answer 403. */
+  readonly rulesAllowed?: boolean
+  /** Assignment rules the settings screen lists, in priority order. */
+  readonly assignmentRules?: Record<string, unknown>[]
+  /** Scheduled reports the schedules screen lists. */
+  readonly scheduledReports?: Record<string, unknown>[]
 }
 
 export interface StubHandle {
@@ -643,6 +649,17 @@ export interface StubHandle {
     mapping?: Record<string, string>
     options?: Record<string, unknown>
   } | null
+  /** The body of the last `POST /leads/distribute`. */
+  readonly lastDistribute: () => {
+    lead_ids?: string[]
+    strategy?: string
+    config?: Record<string, unknown>
+    skip_unavailable?: boolean
+  } | null
+  /** The body of the last assignment-rule create. */
+  readonly lastRule: () => Record<string, unknown> | null
+  /** The id order of the last reorder call. */
+  readonly lastReorder: () => string[] | null
 }
 
 export interface LastSearch {
@@ -683,6 +700,60 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
   }
 
   const requests: string[] = []
+  let assignmentRules: Record<string, unknown>[] = [
+    ...(options.assignmentRules ?? [
+      {
+        id: 'rule-1',
+        name: 'Website enquiries',
+        priority: 0,
+        strategy: 'ROUND_ROBIN',
+        config: { membership_ids: [REP_MEMBERSHIP] },
+        conditions: {},
+        skip_unavailable: true,
+        is_active: true,
+        created_at: '2026-08-20T09:00:00Z',
+      },
+      {
+        id: 'rule-2',
+        name: 'Everyone else',
+        priority: 1,
+        strategy: 'UNASSIGNED',
+        config: {},
+        conditions: {},
+        skip_unavailable: true,
+        is_active: true,
+        created_at: '2026-08-20T09:00:00Z',
+      },
+    ]),
+  ]
+  let salesGroups: Record<string, unknown>[] = [
+    { id: 'group-1', name: 'Inbound', description: null, is_archived: false },
+  ]
+  let scheduledReports: Record<string, unknown>[] = [
+    ...(options.scheduledReports ?? [
+      {
+        id: 'schedule-1',
+        name: 'Monday pipeline',
+        report_type: 'leads',
+        cron: '0 9 * * 1',
+        recipients: ['ops@example.com'],
+        params: {},
+        format: 'CSV',
+        is_active: true,
+        last_run_at: null,
+        last_error: null,
+        created_by: OWNER_MEMBERSHIP,
+      },
+    ]),
+  ]
+  let lastDistributeBody: {
+    lead_ids?: string[]
+    strategy?: string
+    config?: Record<string, unknown>
+    skip_unavailable?: boolean
+  } | null = null
+  let lastRuleBody: Record<string, unknown> | null = null
+  let lastReorderBody: string[] | null = null
   let accessTokenExpired = false
   let refreshCount = 0
   let currentMembers = [...members]
@@ -993,6 +1064,134 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
         is_readonly: isRoot,
         capabilities: { leads: { admin_access: isRoot } },
       })
+    }
+
+    // --- M8: routing and scheduling ---------------------------------------
+    if (
+      options.rulesAllowed === false &&
+      (path.includes('/assignment-rules') || path.includes('/leads/distribute'))
+    ) {
+      return apiError(route, 403, 'insufficient_permissions')
+    }
+
+    if (path.endsWith('/settings/assignment-rules') && method === 'GET') {
+      return json(route, 200, assignmentRules)
+    }
+    if (path.endsWith('/settings/assignment-rules') && method === 'POST') {
+      lastRuleBody = route.request().postDataJSON() as Record<string, unknown>
+      const created = {
+        id: `rule-${assignmentRules.length + 1}`,
+        priority: assignmentRules.length,
+        conditions: {},
+        skip_unavailable: true,
+        is_active: true,
+        created_at: '2026-08-21T09:00:00Z',
+        ...lastRuleBody,
+      }
+      assignmentRules = [...assignmentRules, created]
+      return json(route, 201, created)
+    }
+    if (path.endsWith('/settings/assignment-rules/reorder')) {
+      lastReorderBody = (route.request().postDataJSON() as { order?: string[] }).order ?? []
+      const byId = new Map(assignmentRules.map((r) => [r['id'] as string, r]))
+      assignmentRules = lastReorderBody
+        .map((id) => byId.get(id))
+        .filter((r): r is Record<string, unknown> => Boolean(r))
+      return json(route, 200, assignmentRules)
+    }
+    if (path.endsWith('/settings/assignment-rules/preview')) {
+      return json(route, 200, {
+        rule_id: 'rule-1',
+        rule_name: 'Website enquiries',
+        membership_id: REP_MEMBERSHIP,
+        reason: 'matched',
+      })
+    }
+    const ruleMatch = /\/settings\/assignment-rules\/([^/]+)$/.exec(path)
+    if (ruleMatch && (method === 'PATCH' || method === 'DELETE')) {
+      const id = ruleMatch[1]
+      const patch =
+        method === 'PATCH'
+          ? (route.request().postDataJSON() as Record<string, unknown>)
+          : { is_active: false }
+      assignmentRules = assignmentRules.map((r) => (r['id'] === id ? { ...r, ...patch } : r))
+      if (method === 'DELETE') return json(route, 204, null)
+      return json(
+        route,
+        200,
+        assignmentRules.find((r) => r['id'] === id),
+      )
+    }
+
+    if (path.endsWith('/settings/sales-groups') && method === 'GET') {
+      return json(route, 200, salesGroups)
+    }
+    if (path.endsWith('/settings/sales-groups') && method === 'POST') {
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      const created = {
+        id: `group-${salesGroups.length + 1}`,
+        description: null,
+        is_archived: false,
+        ...body,
+      }
+      salesGroups = [...salesGroups, created]
+      return json(route, 201, created)
+    }
+    if (/\/settings\/sales-groups\/[^/]+\/members$/.test(path)) {
+      if (method === 'PUT') return json(route, 200, route.request().postDataJSON())
+      return json(route, 200, [])
+    }
+    if (/\/settings\/sales-groups\/[^/]+$/.test(path) && method === 'DELETE') {
+      return json(route, 204, null)
+    }
+
+    if (path.endsWith('/leads/distribute')) {
+      lastDistributeBody = route.request().postDataJSON() as {
+        lead_ids?: string[]
+        strategy?: string
+        config?: Record<string, unknown>
+        skip_unavailable?: boolean
+      }
+      const ids = lastDistributeBody.lead_ids ?? []
+      return json(route, 200, {
+        changeset_id: 'changeset-distribute',
+        assigned: ids.length,
+        skipped: 0,
+        total: ids.length,
+      })
+    }
+
+    if (path.endsWith('/scheduled-reports') && method === 'GET') {
+      return json(route, 200, scheduledReports)
+    }
+    if (path.endsWith('/scheduled-reports') && method === 'POST') {
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      const created = {
+        id: `schedule-${scheduledReports.length + 1}`,
+        params: {},
+        format: 'CSV',
+        is_active: true,
+        last_run_at: null,
+        last_error: null,
+        created_by: OWNER_MEMBERSHIP,
+        ...body,
+      }
+      scheduledReports = [...scheduledReports, created]
+      return json(route, 201, created)
+    }
+    if (/\/scheduled-reports\/[^/]+\/run-now$/.test(path)) {
+      const id = path.split('/').slice(-2)[0]
+      scheduledReports = scheduledReports.map((r) =>
+        r['id'] === id ? { ...r, last_run_at: '2026-08-21T09:00:00Z', last_error: null } : r,
+      )
+      return json(
+        route,
+        200,
+        scheduledReports.find((r) => r['id'] === id),
+      )
+    }
+    if (/\/scheduled-reports\/[^/]+$/.test(path) && method === 'DELETE') {
+      return json(route, 204, null)
     }
 
     // --- M7: tasks, labels, undo, imports ---------------------------------
@@ -1410,6 +1609,9 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
 
   return {
     requests,
+    lastDistribute: () => lastDistributeBody,
+    lastRule: () => lastRuleBody,
+    lastReorder: () => lastReorderBody,
     expireAccessToken: () => {
       accessTokenExpired = true
     },

@@ -55,6 +55,8 @@ import { LeadDetail } from '@/features/leads/LeadDetail'
 import { BUILTIN_COLUMN_IDS, DEFAULT_COLUMNS } from '@/features/leads/columns'
 import { LeadTable, Pagination } from '@/features/leads/LeadTable'
 import { QuickFilterBar } from '@/features/leads/QuickFilterBar'
+import { DistributeDialog } from '@/features/routing/DistributeDialog'
+import { useDistribute, useSalesGroups } from '@/features/routing/api'
 import { BulkEditDialog } from '@/features/work/BulkEditDialog'
 import { useBulkUpdate } from '@/features/work/api'
 import { NO_QUICK_FILTERS, type QuickFilters } from '@/features/leads/quickFilters'
@@ -114,6 +116,8 @@ export function LeadsPage() {
   const [columnsOpen, setColumnsOpen] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [distributeOpen, setDistributeOpen] = useState(false)
+  const [distributeError, setDistributeError] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [error, setError] = useState<string | null>(null)
@@ -143,6 +147,8 @@ export function LeadsPage() {
     queryFn: () =>
       api.get<Page<MemberDetail>>(`/workspaces/${workspaceId}/members`, { query: { limit: 100 } }),
   })
+  const salesGroups = useSalesGroups(workspaceId)
+  const distribute = useDistribute(workspaceId)
 
   const columns = layout.data?.columns ?? DEFAULT_COLUMNS
 
@@ -377,6 +383,16 @@ export function LeadsPage() {
             >
               Edit {selectedIds.size}
             </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDistributeError(null)
+                setNotice(null)
+                setDistributeOpen(true)
+              }}
+            >
+              Distribute {selectedIds.size}
+            </Button>
           </div>
         ) : null}
       </div>
@@ -404,6 +420,36 @@ export function LeadsPage() {
           />
         </CardContent>
       </Card>
+
+      <DistributeDialog
+        open={distributeOpen}
+        count={selectedIds.size}
+        members={members.data?.items ?? []}
+        groups={salesGroups.data ?? []}
+        pending={distribute.isPending}
+        error={distributeError}
+        onClose={() => setDistributeOpen(false)}
+        onApply={(body) => {
+          void (async () => {
+            setDistributeError(null)
+            try {
+              const result = await distribute.mutateAsync({
+                lead_ids: [...selectedIds],
+                ...body,
+              })
+              setDistributeOpen(false)
+              setSelectedIds(new Set())
+              setNotice(
+                `Reassigned ${result.assigned} of ${result.total} leads` +
+                  (result.skipped > 0 ? `; ${result.skipped} were already there.` : '.') +
+                  ' Undo it from the edit report if that was wrong.',
+              )
+            } catch (cause) {
+              setDistributeError(message(cause))
+            }
+          })()
+        }}
+      />
 
       <BulkEditDialog
         open={bulkOpen}

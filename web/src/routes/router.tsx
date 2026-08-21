@@ -8,9 +8,11 @@ import { ImportPage } from '@/routes/ImportPage'
 import { LeadsPage } from '@/routes/LeadsPage'
 import { LoginPage } from '@/routes/LoginPage'
 import { MembersPage } from '@/routes/MembersPage'
+import { AssignmentSettingsPage } from '@/routes/AssignmentSettingsPage'
 import { PermissionsPage } from '@/routes/PermissionsPage'
 import { PipelineSettingsPage } from '@/routes/PipelineSettingsPage'
 import { RequireAuth } from '@/routes/RequireAuth'
+import { ScheduledReportsPage } from '@/routes/ScheduledReportsPage'
 import { SystemStatusPage } from '@/routes/SystemStatusPage'
 import { TasksPage } from '@/routes/TasksPage'
 import { TemplatesPage } from '@/routes/TemplatesPage'
@@ -44,6 +46,8 @@ export const router = createBrowserRouter([
       { path: 'settings/pipeline', element: <PipelineSettingsPage /> },
       { path: 'settings/custom-actions', element: <CustomActionsPage /> },
       { path: 'settings/permissions', element: <PermissionsPage /> },
+      { path: 'settings/assignment', element: <AssignmentSettingsPage /> },
+      { path: 'settings/scheduled-reports', element: <ScheduledReportsPage /> },
       { path: 'status', element: <SystemStatusPage /> },
     ],
   },

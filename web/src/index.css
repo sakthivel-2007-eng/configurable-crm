@@ -92,3 +92,42 @@
       'calt' 1;
   }
 }
+
+/*
+ * Chart tokens (M9).
+ *
+ * From the dataviz reference palette, validated with its own script rather
+ * than by eye: `validate_palette.js "#2a78d6" --mode light` and `"#3987e5"
+ * --mode dark` both pass every check — lightness band, chroma floor, and 3:1
+ * against each mode's surface.
+ *
+ * **One hue, deliberately.** Every chart here plots a single series whose job
+ * is magnitude, and the form table's colour job for magnitude is "sequential
+ * (one hue)". An earlier draft painted Won green and Lost red; the validator
+ * put that pair at deutan ΔE 4.1 — the single worst confusion in the language —
+ * and the honest reading is that outcome colour was a convention imported from
+ * elsewhere, not something this data asked for. Position and label carry it
+ * instead.
+ *
+ * The dark column is the same hue stepped for the dark surface, not an
+ * automatic flip.
+ */
+.viz-root {
+  --viz-surface: #fcfcfb;
+  --viz-series: #2a78d6;
+  --viz-ink: #0b0b0b;
+  --viz-ink-secondary: #52514e;
+  --viz-ink-muted: #898781;
+  --viz-grid: #e1e0d9;
+  --viz-baseline: #c3c2b7;
+}
+
+.dark .viz-root {
+  --viz-surface: #1a1a19;
+  --viz-series: #3987e5;
+  --viz-ink: #ffffff;
+  --viz-ink-secondary: #c3c2b7;
+  --viz-ink-muted: #898781;
+  --viz-grid: #2c2c2a;
+  --viz-baseline: #383835;
+}

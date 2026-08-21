@@ -432,6 +432,65 @@ export const PREFERENCES = {
   features: { campaign: true, custom_actions: true, sales_group: false },
 }
 
+/** The served widget catalogue — kinds of chart, never subjects. */
+export const WIDGET_CATALOGUE = [
+  {
+    key: 'follow_ups',
+    label: 'Follow-ups',
+    description: 'Late, upcoming and never-contacted counts.',
+    shape: 'stats',
+    config: {},
+    default_size: { w: 4, h: 2 },
+  },
+  {
+    key: 'leads_by_stage',
+    label: 'Leads by stage',
+    description: 'One bar per pipeline stage.',
+    shape: 'bar',
+    config: {},
+    default_size: { w: 6, h: 4 },
+  },
+  {
+    key: 'funnel',
+    label: 'Funnel',
+    description: 'Stages in pipeline order, won and lost last.',
+    shape: 'funnel',
+    config: {},
+    default_size: { w: 6, h: 4 },
+  },
+  {
+    key: 'breakdown',
+    label: 'Breakdown by field',
+    description: 'Group leads by any field you can view.',
+    shape: 'bar',
+    config: {
+      field_key: {
+        type: 'field',
+        label: 'Group by',
+        required: true,
+        help: "Any lead field — which one means 'source' is your call.",
+      },
+    },
+    default_size: { w: 6, h: 4 },
+  },
+  {
+    key: 'activity',
+    label: 'Activity',
+    description: 'Timeline volume by action kind.',
+    shape: 'bar',
+    config: {},
+    default_size: { w: 6, h: 4 },
+  },
+  {
+    key: 'leaderboard',
+    label: 'Leaderboard',
+    description: "Per-member totals, using this workspace's metrics.",
+    shape: 'table',
+    config: {},
+    default_size: { w: 6, h: 5 },
+  },
+]
+
 export const CAPABILITY_SCHEMA = {
   access: [
     { key: 'leads', proposed: false, capabilities: ['admin_access', 'add_or_update', 'actions'] },
@@ -635,6 +694,12 @@ export interface StubOptions {
   readonly intakeLog?: Record<string, unknown>[]
   /** What `POST /settings/webhooks/{id}/test` answers. */
   readonly webhookTest?: Record<string, unknown>
+  /** When false, every report and dashboard endpoint answers 403. */
+  readonly reportsAllowed?: boolean
+  /** Dashboards the caller can see. Empty falls back to the starter layout. */
+  readonly dashboards?: Record<string, unknown>[]
+  /** Buckets `/dashboard/leads-by-stage` and `/reports/funnel` return. */
+  readonly stageBuckets?: Record<string, unknown>[]
 }
 
 export interface StubHandle {
@@ -674,6 +739,10 @@ export interface StubHandle {
   readonly lastApiKey: () => Record<string, unknown> | null
   /** Outbox ids that were redriven, in order. */
   readonly retried: () => string[]
+  /** The body of the last dashboard create. */
+  readonly lastDashboard: () => Record<string, unknown> | null
+  /** The `field_key` the page last asked `/reports/breakdown` to group by. */
+  readonly lastBreakdown: () => string | null
 }
 
 export interface LastSearch {
@@ -847,6 +916,30 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
     ]),
   ]
   const retriedIds: string[] = []
+  let dashboards: Record<string, unknown>[] = [
+    ...(options.dashboards ?? [
+      {
+        id: 'dashboard-1',
+        name: 'Morning check',
+        owner_id: OWNER_MEMBERSHIP,
+        template_id: null,
+        is_default: true,
+        created_at: '2026-08-01T09:00:00Z',
+        layout: [
+          { widget: 'follow_ups', x: 0, y: 0, w: 12, h: 2 },
+          { widget: 'leads_by_stage', x: 0, y: 2, w: 6, h: 4 },
+          { widget: 'leaderboard', x: 6, y: 2, w: 6, h: 5 },
+        ],
+      },
+    ]),
+  ]
+  const stageBuckets: Record<string, unknown>[] = options.stageBuckets ?? [
+    { key: 'stage-1', label: 'New', count: 18 },
+    { key: 'stage-2', label: 'Contacted', count: 11 },
+    { key: 'stage-3', label: 'Won', count: 4 },
+  ]
+  let lastBreakdownField: string | null = null
+  let lastDashboardBody: Record<string, unknown> | null = null
   let lastWebhookBody: Record<string, unknown> | null = null
   let lastApiKeyBody: Record<string, unknown> | null = null
   let lastRuleBody: Record<string, unknown> | null = null
@@ -1161,6 +1254,83 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
         is_readonly: isRoot,
         capabilities: { leads: { admin_access: isRoot } },
       })
+    }
+
+    // --- M9: reports and dashboards ----------------------------------------
+    if (
+      options.reportsAllowed === false &&
+      (path.includes('/reports/') || path.includes('/dashboard/') || path.includes('/dashboards'))
+    ) {
+      return apiError(route, 403, 'insufficient_permissions')
+    }
+
+    if (path.endsWith('/dashboard/follow-ups')) {
+      return json(route, 200, { late: 3, upcoming: 7, never_contacted: 12 })
+    }
+    if (path.endsWith('/dashboard/leads-by-stage') || path.endsWith('/reports/funnel')) {
+      return json(route, 200, stageBuckets)
+    }
+    if (path.endsWith('/dashboard/filter-stats')) {
+      return json(route, 200, [{ key: 'filter-1', label: 'Hot leads', count: 9 }])
+    }
+    if (path.endsWith('/reports/activity')) {
+      return json(route, 200, { CALL_LOGGED: 40, NOTE: 12, STAGE_CHANGE: 5 })
+    }
+    if (path.endsWith('/reports/breakdown')) {
+      const key = new URL(route.request().url()).searchParams.get('field_key')
+      lastBreakdownField = key
+      return json(route, 200, [
+        { key: 'Walk-in', label: 'Walk-in', count: 14 },
+        { key: '(not set)', label: '(not set)', count: 3 },
+      ])
+    }
+    if (path.endsWith('/reports/leaderboard')) {
+      return json(route, 200, [
+        {
+          membership_id: OWNER_MEMBERSHIP,
+          name: 'Olivia Owner',
+          metrics: { leads: 20, calls: 55 },
+        },
+        {
+          membership_id: REP_MEMBERSHIP,
+          name: 'Ravi Rep',
+          metrics: { leads: 8, calls: 21 },
+        },
+      ])
+    }
+    if (path.endsWith('/dashboards/widgets')) {
+      return json(route, 200, WIDGET_CATALOGUE)
+    }
+    if (path.endsWith('/dashboards') && method === 'GET') {
+      return json(route, 200, dashboards)
+    }
+    if (path.endsWith('/dashboards') && method === 'POST') {
+      lastDashboardBody = route.request().postDataJSON() as Record<string, unknown>
+      const created = {
+        id: `dashboard-${dashboards.length + 1}`,
+        owner_id: OWNER_MEMBERSHIP,
+        template_id: null,
+        is_default: false,
+        created_at: '2026-08-21T09:00:00Z',
+        ...lastDashboardBody,
+      }
+      dashboards = [...dashboards, created]
+      return json(route, 201, created)
+    }
+    if (/\/dashboards\/[^/]+$/.test(path) && method === 'DELETE') {
+      const id = path.split('/').pop()
+      dashboards = dashboards.filter((d) => d['id'] !== id)
+      return json(route, 204, null)
+    }
+    if (/\/dashboards\/[^/]+$/.test(path) && method === 'PATCH') {
+      const id = path.split('/').pop()
+      lastDashboardBody = route.request().postDataJSON() as Record<string, unknown>
+      dashboards = dashboards.map((d) => (d['id'] === id ? { ...d, ...lastDashboardBody } : d))
+      return json(
+        route,
+        200,
+        dashboards.find((d) => d['id'] === id),
+      )
     }
 
     // --- M10: integrations -------------------------------------------------
@@ -1817,6 +1987,8 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
     lastWebhook: () => lastWebhookBody,
     lastApiKey: () => lastApiKeyBody,
     retried: () => retriedIds,
+    lastDashboard: () => lastDashboardBody,
+    lastBreakdown: () => lastBreakdownField,
     expireAccessToken: () => {
       accessTokenExpired = true
     },

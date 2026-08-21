@@ -2,6 +2,8 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 
 import { AppLayout } from '@/routes/AppLayout'
 import { CustomActionsPage } from '@/routes/CustomActionsPage'
+import { DashboardPage } from '@/routes/DashboardPage'
+import { DashboardSettingsPage } from '@/routes/DashboardSettingsPage'
 import { EditReportPage } from '@/routes/EditReportPage'
 import { FieldSettingsPage } from '@/routes/FieldSettingsPage'
 import { ImportPage } from '@/routes/ImportPage'
@@ -37,6 +39,7 @@ export const router = createBrowserRouter([
     children: [
       // Leads is the landing page now that there is something to land on.
       { index: true, element: <Navigate to="/leads" replace /> },
+      { path: 'dashboard', element: <DashboardPage /> },
       { path: 'leads', element: <LeadsPage /> },
       { path: 'tasks', element: <TasksPage /> },
       { path: 'import', element: <ImportPage /> },
@@ -50,6 +53,7 @@ export const router = createBrowserRouter([
       { path: 'settings/assignment', element: <AssignmentSettingsPage /> },
       { path: 'settings/scheduled-reports', element: <ScheduledReportsPage /> },
       { path: 'settings/integrations', element: <IntegrationsPage /> },
+      { path: 'settings/dashboards', element: <DashboardSettingsPage /> },
       { path: 'status', element: <SystemStatusPage /> },
     ],
   },

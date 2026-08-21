@@ -863,3 +863,65 @@ export interface IntakeLogEntry {
   readonly created_at: string
   readonly request_body: Record<string, unknown>
 }
+
+// --- M9: reports and dashboards ---------------------------------------------
+
+/**
+ * One bar.
+ *
+ * `key` is what a drill-through filters on; `label` is what a person reads.
+ * They differ for a stage (uuid vs name) and coincide for a field value.
+ */
+export interface Bucket {
+  readonly key: string
+  readonly label: string
+  readonly count: number
+}
+
+export interface FollowUpCounts {
+  readonly late: number
+  readonly upcoming: number
+  readonly never_contacted: number
+}
+
+export interface LeaderboardRow {
+  readonly membership_id: string
+  readonly name: string
+  /** Only the metrics this workspace turned on, plus leads and calls. */
+  readonly metrics: Record<string, number>
+}
+
+/** A widget the editor can render a config form for without knowing it. */
+export interface WidgetSpec {
+  readonly key: string
+  readonly label: string
+  readonly description: string
+  /** stats | bar | funnel | table */
+  readonly shape: string
+  readonly config: Record<
+    string,
+    { type: string; label: string; required?: boolean; help?: string }
+  >
+  readonly default_size: { w: number; h: number }
+}
+
+export interface DashboardWidget {
+  readonly widget: string
+  readonly x: number
+  readonly y: number
+  readonly w: number
+  readonly h: number
+  readonly config?: Record<string, string>
+}
+
+export interface Dashboard {
+  readonly id: string
+  readonly name: string
+  /** Null means shared with the whole workspace. */
+  readonly owner_id: string | null
+  /** Non-null means everyone on that permission template gets it. */
+  readonly template_id: string | null
+  readonly layout: readonly DashboardWidget[]
+  readonly is_default: boolean
+  readonly created_at: string
+}

@@ -19,6 +19,7 @@
  * can do.
  */
 
+import { useSearchParams } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
@@ -101,7 +102,16 @@ export function LeadsPage() {
   const [search, setSearch] = useState('')
   const [filterNode, setFilterNode] = useState<GroupNode>(emptyFilter)
   const [activeFilterId, setActiveFilterId] = useState<string | null>(null)
-  const [quick, setQuick] = useState<QuickFilters>(NO_QUICK_FILTERS)
+  // Seeded from the URL so a dashboard drill-through lands filtered. Without
+  // this the chart's number and the list behind it disagree — and a chart that
+  // disagrees with its own drill-through is worse than no chart, because it is
+  // believed.
+  const [searchParams] = useSearchParams()
+  const [quick, setQuick] = useState<QuickFilters>(() => ({
+    ...NO_QUICK_FILTERS,
+    stageId: searchParams.get('stage_id'),
+    unassigned: searchParams.get('unassigned') === 'true',
+  }))
   // Selection lives here rather than in the table so it survives paging.
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
   const [bulkOpen, setBulkOpen] = useState(false)

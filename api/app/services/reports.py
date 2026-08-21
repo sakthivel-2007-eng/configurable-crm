@@ -49,6 +49,7 @@ from app.models import (
     Workspace,
 )
 from app.permissions import FieldGrants
+from app.services.leads import lead_visibility_clause
 from app.tenancy.session import ScopedSession
 
 __all__ = [
@@ -136,16 +137,15 @@ class ReportService:
     # --- shared scoping ----------------------------------------------------
 
     def _visibility(self) -> ColumnElement[bool] | None:
-        """The same hierarchy rule every list endpoint applies.
+        """The same hierarchy rule every list endpoint applies — literally.
 
-        A report that skipped it would let a caller total up their colleagues'
-        pipeline by asking a different endpoint — the numbers are the data.
+        Shared with `LeadService` rather than restated. An earlier version of
+        this method restated it and dropped the "unassigned leads are visible
+        to everyone" half, so a caller's dashboard counted fewer leads than
+        their own list showed and nothing said why. The numbers are the data;
+        a report that disagrees with the list is a bug in both.
         """
-        if self._sees_all:
-            return None
-        if not self._visible:
-            return Lead.id.is_(None)
-        return Lead.assignee_id.in_(self._visible)
+        return lead_visibility_clause(sees_all=self._sees_all, visible=self._visible)
 
     def _leads(self, window: DateRange | None = None) -> Select[tuple[Any, ...]]:
         stmt = select(Lead).where(
@@ -265,7 +265,7 @@ class ReportService:
         )
         return {kind.value: int(count) for kind, count in (await self._session.execute(stmt)).all()}
 
-    async def follow_ups(self, *, window: DateRange) -> dict[str, int]:
+    async def follow_ups(self) -> dict[str, int]:
         """The dashboard's headline numbers: what needs doing.
 
         Deliberately about *now* rather than the window — an overdue follow-up

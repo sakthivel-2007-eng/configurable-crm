@@ -79,8 +79,6 @@ DateTo = Annotated[dt.date | None, Query(alias="to")]
 @router.get("/dashboard/follow-ups", response_model=FollowUpCounts, summary="What needs doing")
 async def follow_ups(
     scope: Annotated[WorkspaceScope, Depends(require_workspace)],
-    from_: DateFrom = None,
-    to: DateTo = None,
 ) -> FollowUpCounts:
     """Deliberately about *now*, not the window.
 
@@ -88,22 +86,36 @@ async def follow_ups(
     be looking at; burying it inside a date filter is how it gets missed.
     """
     _require(scope, "reports", "view_reports")
-    counts = await (await _reports(scope)).follow_ups(window=_window(scope, from_, to))
+    counts = await (await _reports(scope)).follow_ups()
     return FollowUpCounts(**counts)
 
 
 @router.get(
     "/dashboard/leads-by-stage",
     response_model=list[BucketRead],
-    summary="Leads per pipeline stage",
+    summary="Leads per pipeline stage, right now",
 )
 async def leads_by_stage(
     scope: Annotated[WorkspaceScope, Depends(require_workspace)],
-    from_: DateFrom = None,
-    to: DateTo = None,
 ) -> list[BucketRead]:
+    """Current state, and deliberately **not** windowed by a date range.
+
+    A departure from the contract's blanket "all take from/to", made because
+    the two requirements collide and this one is the more specific: the
+    milestone is done when *"you click a cell showing N and the list says
+    exactly N"*, and the lead list cannot express "created between these
+    dates" — its quick filters are stage, assignee and rating.
+
+    Windowing it would also change what the widget means. A pipeline is a
+    current-state view; "leads created in the last 30 days that are now Won" is
+    a cohort metric that looks exactly like a pipeline metric and is not one.
+    That is the dangerous kind of wrong — believable.
+
+    The date range still governs `activity`, `leaderboard` and `breakdown`,
+    where a period is what the question is actually about.
+    """
     _require(scope, "reports", "view_reports")
-    buckets = await (await _reports(scope)).leads_by_stage(_window(scope, from_, to))
+    buckets = await (await _reports(scope)).leads_by_stage()
     return [BucketRead(key=b.key, label=b.label, count=b.count) for b in buckets]
 
 
@@ -170,12 +182,13 @@ def _as_node(definition: Any) -> Any:
 @router.get("/reports/funnel", response_model=list[BucketRead], summary="Funnel")
 async def funnel(
     scope: Annotated[WorkspaceScope, Depends(require_workspace)],
-    from_: DateFrom = None,
-    to: DateTo = None,
 ) -> list[BucketRead]:
-    """Stage counts in pipeline order, won and lost last."""
+    """Stage counts in pipeline order, won and lost last.
+
+    Current state, for the same reason as `leads-by-stage` above.
+    """
     _require(scope, "reports", "view_reports")
-    buckets = await (await _reports(scope)).funnel(_window(scope, from_, to))
+    buckets = await (await _reports(scope)).funnel()
     return [BucketRead(key=b.key, label=b.label, count=b.count) for b in buckets]
 
 

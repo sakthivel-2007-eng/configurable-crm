@@ -194,14 +194,73 @@ async def test_a_caller_sees_only_their_own_numbers(
         headers=ws.owner.auth,
         json={"assignee_id": str(caller.membership.id)},
     )
-    await _lead(api, ws, "+19995552002")  # somebody else's
+    # Somebody else's — and it has to be *actually assigned* to them. An
+    # unassigned lead belongs to nobody yet and is visible to everyone, so
+    # leaving this one unassigned would test the opposite of what it claims.
+    theirs = await _lead(api, ws, "+19995552002")
+    await api.patch(
+        ws.path(f"/leads/{theirs['id']}"),
+        headers=ws.owner.auth,
+        json={"assignee_id": str(ws.owner.membership.id)},
+    )
 
     stages = await api.get(ws.path("/dashboard/leads-by-stage"), headers=caller.auth)
     assert stages.status_code == 200, stages.text
-    assert sum(row["count"] for row in stages.json()) == 1
+    listed = await api.post(ws.path("/leads/search"), headers=caller.auth, json={"limit": 1})
+    assert listed.status_code == 200, listed.text
+
+    # Agreement is the property, not a magic number: whatever the hierarchy
+    # resolves to, the chart and the list must resolve to the same thing.
+    # Hardcoding "1" would encode this fixture's org chart instead of the rule.
+    charted = sum(row["count"] for row in stages.json())
+    assert charted == listed.json()["total"], (
+        f"the dashboard counted {charted} and the list counted {listed.json()['total']}"
+    )
 
     as_owner = await api.get(ws.path("/dashboard/leads-by-stage"), headers=ws.owner.auth)
-    assert sum(row["count"] for row in as_owner.json()) == 2
+    assert sum(row["count"] for row in as_owner.json()) == 2, "an admin sees both"
+
+
+async def test_a_report_counts_unassigned_leads_like_the_list_does(
+    api: AsyncClient,
+    ws: WorkspaceFixture,
+    db_session: AsyncSession,
+    hasher: PasswordHasherService,
+) -> None:
+    """A regression, and one that would have shipped silently.
+
+    The visibility rule has two halves: you see your own reports' leads, **and**
+    everyone sees unassigned ones — a lead that belongs to nobody yet would
+    otherwise vanish until somebody claimed it. The first version of
+    `ReportService` restated the rule and dropped the second half, so a caller's
+    dashboard counted fewer leads than their own list showed, with nothing on
+    screen to say why.
+
+    Both now call one function. This asserts the two agree.
+    """
+    caller = await add_member(
+        db_session,
+        hasher,
+        ws,
+        key="counter",
+        email="reports-counter@example.com",
+        template_name="Caller",
+    )
+    await login(api, caller)
+
+    # Nobody's lead.
+    await _lead(api, ws, "+19995556001")
+
+    listed = await api.post(ws.path("/leads/search"), headers=caller.auth, json={"limit": 1})
+    assert listed.status_code == 200, listed.text
+
+    charted = await api.get(ws.path("/dashboard/leads-by-stage"), headers=caller.auth)
+    assert charted.status_code == 200, charted.text
+
+    assert sum(row["count"] for row in charted.json()) == listed.json()["total"], (
+        "the dashboard and the lead list disagree about how many leads exist"
+    )
+    assert listed.json()["total"] == 1, "an unassigned lead must be visible to a caller"
 
 
 async def test_the_leaderboard_needs_its_own_capability(
@@ -479,7 +538,7 @@ async def test_an_inverted_or_enormous_range_is_refused(
     api: AsyncClient, ws: WorkspaceFixture
 ) -> None:
     inverted = await api.get(
-        ws.path("/reports/funnel"),
+        ws.path("/reports/activity"),
         headers=ws.owner.auth,
         params={"from": "2026-08-31", "to": "2026-08-01"},
     )
@@ -487,7 +546,7 @@ async def test_an_inverted_or_enormous_range_is_refused(
     assert inverted.json()["detail"]["code"] == "invalid_range"
 
     enormous = await api.get(
-        ws.path("/reports/funnel"),
+        ws.path("/reports/activity"),
         headers=ws.owner.auth,
         params={"from": "2020-01-01", "to": "2026-01-01"},
     )

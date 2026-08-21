@@ -9,6 +9,7 @@ import { useAuth } from '@/features/auth/context'
  * then configure the schema that shapes it all.
  */
 const NAV_LINKS = [
+  { to: '/dashboard', label: 'Dashboard' },
   { to: '/leads', label: 'Leads' },
   { to: '/tasks', label: 'Tasks' },
   { to: '/import', label: 'Import' },
@@ -22,6 +23,7 @@ const NAV_LINKS = [
   { to: '/settings/assignment', label: 'Assignment' },
   { to: '/settings/scheduled-reports', label: 'Schedules' },
   { to: '/settings/integrations', label: 'Integrations' },
+  { to: '/settings/dashboards', label: 'Dashboards' },
   { to: '/status', label: 'System' },
 ] as const
 

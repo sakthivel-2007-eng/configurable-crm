@@ -67,6 +67,26 @@ class QuickFilters:
     stage_kinds: tuple[str, ...] = ()
 
 
+def lead_visibility_clause(
+    *, sees_all: bool, visible: frozenset[uuid.UUID]
+) -> ColumnElement[bool] | None:
+    """The manager-sees-their-reports rule, as a predicate. `None` means no filter.
+
+    Resolved in the scoping layer (M1) into `visible_membership_ids`; this is
+    the one place it becomes SQL. **An unassigned lead is visible to everyone**
+    who can see the workspace — it belongs to nobody yet, and hiding it would
+    mean new leads vanished until somebody assigned them.
+
+    A module-level function rather than a method because M9's reports need the
+    identical rule, and the first version of them reimplemented it and quietly
+    dropped the unassigned half — so a caller's dashboard would have counted
+    fewer leads than their own list showed, with nothing to indicate why.
+    """
+    if sees_all:
+        return None
+    return Lead.assignee_id.in_(visible) | Lead.assignee_id.is_(None)
+
+
 class LeadService:
     """Create, read and update leads.
 
@@ -177,16 +197,8 @@ class LeadService:
     # --- reads -------------------------------------------------------------
 
     def _visibility_clause(self) -> Any:
-        """The manager-sees-their-reports rule, applied to leads.
-
-        Resolved in the scoping layer (M1) into `visible_membership_ids`; this
-        is the one place it is turned into a predicate. An unassigned lead is
-        visible to everyone who can see the workspace — it belongs to nobody
-        yet, and hiding it would mean new leads vanished until assigned.
-        """
-        if self._sees_all:
-            return None
-        return Lead.assignee_id.in_(self._visible) | Lead.assignee_id.is_(None)
+        """This caller's lead-visibility predicate. See `lead_visibility_clause`."""
+        return lead_visibility_clause(sees_all=self._sees_all, visible=self._visible)
 
     async def get_lead(self, lead_id: uuid.UUID) -> Lead:
         statement = (

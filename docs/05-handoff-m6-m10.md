@@ -216,12 +216,10 @@ cd web && pnpm tsc --noEmit && pnpm lint && pnpm format:check && pnpm exec playw
 > - **`ScopedSession` stamps `session.info` permanently.** Wrapping a session
 >   scopes every later query on it, including ones made after the scoped work
 >   finishes. Use a fresh session for anything addressing another workspace.
-> - **`alembic check` reports the runtime indexes as drift.** Once any workspace
->   declares an indexed field, the worker's `ix_lv_…` expression indexes exist in
->   the database and no migration describes them — by design, since they are the
->   one sanctioned piece of runtime DDL (rule 7). A drift check is only
->   meaningful against a database where nothing has been declared indexed, which
->   is what CI gets.
+> - **The runtime `ix_lv_…` indexes are invisible to Alembic**, by design —
+>   they are the one sanctioned piece of runtime DDL (rule 7). M7 added an
+>   `include_object` filter to `alembic/env.py` so autogenerate neither reports
+>   them as drift nor writes a `drop_index` for them into the next revision.
 >
 > Not built, and deliberately: `saved_filters` reorder and duplicate exist on
 > the API and have tests, but the UI exposes neither yet — the sidebar that
@@ -300,6 +298,35 @@ days" both work **through the builder**, and p95 < 300ms on the 50k workspace.
 ---
 
 ## 4. M7 — Tasks, bulk, import/export, undo *(7–9 days)*
+
+> **Update, 21 Aug 2026 — M7 has landed.** `26b0e20` (bulk + undo), `3b055ba`
+> (tasks, labels, imports), `9339ffa` (export, duplicates, merge), `2958832`
+> (frontend). Revision `0007_m7_work`. 522 backend tests, 86 Playwright. Both
+> acceptance checks pass: 300 leads bulk-edited and fully undone, and a
+> historical action import producing a coherent timeline.
+>
+> Five things this milestone settled that the section below does not say:
+>
+> - **Conflict detection is per-value, not per-timestamp.** "Is the lead's
+>   current value still the one the changeset set?" rather than "was this lead
+>   touched since". Cheaper, more precise, and it correctly *permits* an undo
+>   where somebody changed a value and changed it back.
+> - **An imported action may only be a contact kind.** A sheet must not be able
+>   to write a FIELD_CHANGE or STAGE_CHANGE — their payloads carry old/new
+>   values that undo would replay against a history that never happened.
+> - **`GET /leads/duplicates` does not group on identity.** `leads_identity_uq`
+>   makes identity duplicates impossible, so the contract's literal wording
+>   ships an always-empty screen. It groups on every phone and email the
+>   workspace holds instead.
+> - **`admin_access` only grants within groups a template names.** Root and
+>   Admin named no `tasks` group, so every task endpoint 403'd — and Root is
+>   `is_readonly`, so nobody could fix it from the UI. Provisioning is fixed and
+>   0007 backfills existing workspaces. **Any future milestone adding a
+>   capability group must do both.**
+> - **`alembic autogenerate` wanted to drop the runtime `ix_lv_*` indexes**,
+>   which would delete a live customer's index on deploy. `env.py` now filters
+>   them, which also retires the drift caveat noted under M6.
+
 
 ### The part that carries risk: undo
 
@@ -528,7 +555,7 @@ These are the ones that have actually caused rework here.
 0.2 indexed-field worker   done  5f14730
     demo seed (§8)         done  231d845
 M6  list + filters         done  3c6b2b4 · 231d845 · c7db934
-M7  tasks, bulk, undo      7-9d
+M7  tasks, bulk, undo      done  26b0e20 · 3b055ba · 9339ffa · 2958832
 M8  assignment, scheduler  6-8d
 M9  dashboards, reports    6-8d
 M10 intake, outbox         5-7d

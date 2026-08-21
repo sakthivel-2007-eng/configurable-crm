@@ -74,6 +74,13 @@ class ChangesetRead(BaseModel):
     summary: str
     lead_count: int
     is_undone: bool
+    undone_at: dt.datetime | None = None
+    undone_by_id: uuid.UUID | None = None
+    #: Set when this changeset *is* an undo, pointing at what it reversed. An
+    #: edit report that cannot show which batch undid which is only half a
+    #: report — and this is the only marker, since an undo carries no distinct
+    #: source.
+    undo_of_id: uuid.UUID | None = None
     created_at: dt.datetime
 
 
@@ -110,3 +117,36 @@ class MessageTemplateCreate(BaseModel):
 
 class TemplateRenderRequest(BaseModel):
     lead_id: uuid.UUID
+
+
+class LeadBulkUpdate(BaseModel):
+    """`POST /leads/bulk` — one change applied to many leads.
+
+    Explicit ids rather than a filter: this is what a table with checkboxes
+    sends, and it means the operator's undo preview lists exactly the leads
+    they picked. Redistributing a *filtered* set is `POST /leads/distribute`,
+    which lands in M8.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lead_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    values: dict[str, Any] | None = None
+    stage_id: uuid.UUID | None = None
+    lost_reason_id: uuid.UUID | None = None
+    assignee_id: uuid.UUID | None = None
+    rating: int | None = Field(default=None, ge=1, le=5)
+    unset: list[str] | None = None
+
+
+class UndoRequest(BaseModel):
+    """`POST /changesets/{id}/undo`.
+
+    `skip_conflicts` defaults to false, so the first call on a batch with
+    conflicts refuses and shows them. Undoing over someone else's later edit
+    has to be a decision somebody made, not the default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skip_conflicts: bool = False

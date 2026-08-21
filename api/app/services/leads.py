@@ -31,14 +31,19 @@ from app.filters.compiler import FilterCompiler
 from app.filters.dsl import FilterNode, validate_shape
 from app.models.enums import ChangesetSource, IndexedFieldStatus, StageKind
 from app.models.field import FieldOption, IndexedField, LeadField
-from app.models.lead import Action, Lead
+from app.models.lead import Action, Changeset, Lead
 from app.models.pipeline import LostReason, Stage
 from app.models.workspace import Membership, Workspace
 from app.permissions.projection import FieldProjectionService, FieldWriteFilter
 from app.services.actions import ActionWriter, FieldDelta
 from app.tenancy.session import ScopedSession
 
-__all__ = ["LeadService", "QuickFilters"]
+__all__ = ["MAX_BULK_LEADS", "LeadService", "QuickFilters"]
+
+#: docs/02-api-contract.md — "Max 500". A larger batch is a job, not a
+#: request: it would hold a transaction open long enough to matter and
+#: produce an undo preview nobody can read.
+MAX_BULK_LEADS = 500
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -304,7 +309,7 @@ class LeadService:
         never talked about.
         """
         lead = await self.get_lead(lead_id)
-        validator = await self._load_schema()
+        await self._load_schema()
 
         writer = ActionWriter(self._session, actor_id=self._actor_id)
         await writer.open_changeset(
@@ -312,6 +317,42 @@ class LeadService:
             summary=f"Updated lead {lead.identity_value}",
             lead_count=1,
         )
+        await self._apply_update(
+            lead,
+            writer,
+            values=values,
+            stage_id=stage_id,
+            lost_reason_id=lost_reason_id,
+            assignee_id=assignee_id,
+            rating=rating,
+            unset=unset,
+        )
+        await self._session.flush()
+        return lead, writer
+
+    async def _apply_update(
+        self,
+        lead: Lead,
+        writer: ActionWriter,
+        *,
+        values: Mapping[str, Any] | None = None,
+        stage_id: uuid.UUID | None = None,
+        lost_reason_id: uuid.UUID | None = None,
+        assignee_id: uuid.UUID | None = None,
+        rating: int | None = None,
+        unset: frozenset[str] = frozenset(),
+    ) -> None:
+        """One lead's mutation, appended to an already-open changeset.
+
+        Shared by the single PATCH and by bulk edit so the two cannot drift.
+        That matters more than the deduplication: if bulk had its own copy, a
+        permission check or an action added to one would silently not exist in
+        the other, and the bulk path is the one that touches 500 leads at once.
+
+        Deliberately does not flush or open a changeset — the caller owns both,
+        which is what lets 500 leads share one batch.
+        """
+        validator = await self._load_schema()
 
         deltas: list[FieldDelta] = []
         if values or unset:
@@ -387,8 +428,114 @@ class LeadService:
         # value feeds the vector too, and it can change on a path that touched
         # no searchable field.
         self._refresh_search_vector(lead)
+
+    async def bulk_update(
+        self,
+        *,
+        lead_ids: Sequence[uuid.UUID],
+        values: Mapping[str, Any] | None = None,
+        stage_id: uuid.UUID | None = None,
+        lost_reason_id: uuid.UUID | None = None,
+        assignee_id: uuid.UUID | None = None,
+        rating: int | None = None,
+        unset: frozenset[str] = frozenset(),
+    ) -> tuple[Changeset, list[Lead]]:
+        """Apply one change to many leads as a single undoable batch.
+
+        Three properties this has to hold, all of them load-bearing for M7's
+        undo:
+
+        1. **One changeset.** Every action the run produces carries its id, so
+           the whole batch reverses as a unit. A changeset per lead would make
+           "undo that mistake" 500 separate decisions.
+        2. **Permission-checked per field, once.** `_apply_update` runs the
+           write filter for every lead, and the filter refuses rather than
+           dropping — so a forbidden field fails the batch on the first lead
+           instead of writing 200 leads and then stopping.
+        3. **Capped.** 500 per the contract. A request that would touch more is
+           refused with the cap named, not silently truncated to the first 500 —
+           truncation would report success over work it did not do.
+        """
+        if not lead_ids:
+            raise api_error(422, "no_leads_selected", "Select at least one lead to edit")
+        if len(lead_ids) > MAX_BULK_LEADS:
+            raise api_error(
+                422,
+                "bulk_limit_exceeded",
+                f"A bulk edit may cover at most {MAX_BULK_LEADS} leads at once",
+                limit=MAX_BULK_LEADS,
+                requested=len(lead_ids),
+            )
+
+        await self._load_schema()
+
+        statement = self._session.select(Lead).where(
+            Lead.id.in_(list(lead_ids)), Lead.deleted_at.is_(None)
+        )
+        if (visibility := self._visibility_clause()) is not None:
+            statement = statement.where(visibility)
+        rows = await self._session.execute(statement)
+        leads = list(rows.scalars().all())
+
+        # Absent means deleted, another workspace's, or outside this caller's
+        # visibility. Refused rather than quietly edited-around: an operator who
+        # selected 300 leads and sees "297 updated" has learnt something about
+        # the three; one who sees 300 has been misled.
+        if len(leads) != len(set(lead_ids)):
+            found = {lead.id for lead in leads}
+            raise api_error(
+                404,
+                "leads_not_found",
+                "Some of the selected leads are no longer available to edit",
+                missing=[str(i) for i in dict.fromkeys(lead_ids) if i not in found],
+            )
+
+        writer = ActionWriter(self._session, actor_id=self._actor_id)
+        await writer.open_changeset(
+            source=ChangesetSource.BULK_EDIT,
+            summary=self._bulk_summary(values, stage_id, assignee_id, rating, unset, len(leads)),
+            lead_count=len(leads),
+        )
+        for lead in leads:
+            await self._apply_update(
+                lead,
+                writer,
+                values=values,
+                stage_id=stage_id,
+                lost_reason_id=lost_reason_id,
+                assignee_id=assignee_id,
+                rating=rating,
+                unset=unset,
+            )
         await self._session.flush()
-        return lead, writer
+        return writer.changeset, leads
+
+    def _bulk_summary(
+        self,
+        values: Mapping[str, Any] | None,
+        stage_id: uuid.UUID | None,
+        assignee_id: uuid.UUID | None,
+        rating: int | None,
+        unset: frozenset[str],
+        count: int,
+    ) -> str:
+        """What the edit report will show for this run.
+
+        Written at open time rather than derived afterwards, because the intent
+        ("Set Stage on 312 leads") is knowable now and unreconstructable later.
+        """
+        by_key = {f.key: f.label for f in self._fields}
+        changed = [by_key.get(key, key) for key in (values or {})]
+        changed += [by_key.get(key, key) for key in sorted(unset)]
+        if stage_id is not None:
+            changed.append("Stage")
+        if assignee_id is not None:
+            changed.append("Assignee")
+        if rating is not None:
+            changed.append("Rating")
+
+        what = ", ".join(changed) if changed else "nothing"
+        return f"Set {what} on {count} lead{'s' if count != 1 else ''}"
 
     def _refresh_search_vector(self, lead: Lead) -> None:
         """Recompute `search_vector` from the lead's searchable values.

@@ -11,15 +11,17 @@ people remember.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import func, select
 
 from app.errors import api_error, not_found
 from app.models.enums import ChangesetSource, StageKind, SystemActionKind, TemplateChannel
 from app.models.field import CustomActionType
-from app.models.lead import Changeset
+from app.models.lead import Action, Changeset
 from app.models.pipeline import CallDisposition
 from app.schemas.common import Page
 from app.schemas.filter import LeadSearchRequest
@@ -28,14 +30,17 @@ from app.schemas.lead import (
     CallLogCreate,
     ChangesetRead,
     CustomActionLog,
+    LeadBulkUpdate,
     LeadCreate,
     LeadUpdate,
     MessageTemplateCreate,
     NoteCreate,
     TemplateRenderRequest,
+    UndoRequest,
 )
 from app.services.leads import LeadService, QuickFilters
 from app.services.templates import MessageTemplateService
+from app.services.undo import UndoService
 from app.tenancy.scoping import WorkspaceScope, require_workspace
 
 router = APIRouter(tags=["leads"])
@@ -46,6 +51,21 @@ async def _lead_service(
 ) -> LeadService:
     """Build the service with this caller's chokepoints already bound."""
     return LeadService(
+        scope.session,
+        workspace=scope.workspace,
+        projection=await scope.projection(),
+        write_filter=await scope.write_filter(),
+        actor_id=scope.membership_id,
+        visible_membership_ids=scope.visible_membership_ids,
+        sees_all=scope.sees_all_members,
+    )
+
+
+async def _undo_service(
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> UndoService:
+    """Undo is a lead write, so it gets the same bound chokepoints."""
+    return UndoService(
         scope.session,
         workspace=scope.workspace,
         projection=await scope.projection(),
@@ -148,6 +168,34 @@ async def search_leads(
         limit=payload.limit,
         offset=payload.offset,
     )
+
+
+@router.post("/leads/bulk", summary="Apply one change to many leads")
+async def bulk_update_leads(
+    payload: LeadBulkUpdate,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[LeadService, Depends(_lead_service)],
+) -> dict[str, Any]:
+    """One changeset for the whole run, so the batch undoes as a unit.
+
+    Declared before `/leads/{lead_id}` — conventions §5.
+    """
+    _require(scope, "bulk_edit")
+    changeset, leads = await service.bulk_update(
+        lead_ids=payload.lead_ids,
+        values=payload.values,
+        stage_id=payload.stage_id,
+        lost_reason_id=payload.lost_reason_id,
+        assignee_id=payload.assignee_id,
+        rating=payload.rating,
+        unset=frozenset(payload.unset or ()),
+    )
+    await scope.session.commit()
+    return {
+        "changeset_id": str(changeset.id),
+        "summary": changeset.summary,
+        "leads_updated": len(leads),
+    }
 
 
 @router.post("/leads", status_code=status.HTTP_201_CREATED, summary="Create a lead")
@@ -345,21 +393,95 @@ async def list_changesets(
     scope: Annotated[WorkspaceScope, Depends(require_workspace)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
+    source: Annotated[ChangesetSource | None, Query()] = None,
+    actor_id: Annotated[uuid.UUID | None, Query()] = None,
+    date_from: Annotated[dt.datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.datetime | None, Query(alias="to")] = None,
+    undone: Annotated[bool | None, Query()] = None,
 ) -> Page[ChangesetRead]:
-    """Every mutation batch, newest first.
+    """Every mutation batch, newest first, filterable by source, actor and date.
 
-    M7 adds preview-undo and undo on top; the record they operate on is written
-    from M5 onward, which is the point of building changesets now.
+    The filters are what makes this an edit report rather than a log: "what did
+    the 9am import do" and "what has Priya changed today" are the two questions
+    anyone actually brings to it.
     """
-    rows, total = await scope.session.list(
-        Changeset, limit=limit, offset=offset, order_by=Changeset.created_at.desc()
+    statement = scope.session.select(Changeset)
+    if source is not None:
+        statement = statement.where(Changeset.source == source)
+    if actor_id is not None:
+        statement = statement.where(Changeset.actor_id == actor_id)
+    if date_from is not None:
+        statement = statement.where(Changeset.created_at >= date_from)
+    if date_to is not None:
+        statement = statement.where(Changeset.created_at <= date_to)
+    if undone is not None:
+        statement = statement.where(Changeset.is_undone.is_(undone))
+
+    total_result = await scope.session.execute(
+        select(func.count()).select_from(statement.subquery())
+    )
+    rows = await scope.session.execute(
+        statement.order_by(Changeset.created_at.desc()).limit(limit).offset(offset)
     )
     return Page(
-        items=[ChangesetRead.model_validate(c) for c in rows],
-        total=total,
+        items=[ChangesetRead.model_validate(c) for c in rows.scalars().all()],
+        total=int(total_result.scalar_one()),
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/changesets/{changeset_id}", summary="A changeset and what it produced")
+async def get_changeset(
+    changeset_id: uuid.UUID,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> dict[str, Any]:
+    changeset = await scope.session.get(Changeset, changeset_id)
+    if changeset is None:
+        raise not_found("Changeset")
+
+    rows = await scope.session.execute(
+        scope.session.select(Action)
+        .where(Action.changeset_id == changeset_id)
+        .order_by(Action.performed_at)
+        .limit(500)
+    )
+    return {
+        **ChangesetRead.model_validate(changeset).model_dump(mode="json"),
+        "actions": [ActionRead.model_validate(a).model_dump(mode="json") for a in rows.scalars()],
+    }
+
+
+@router.post("/changesets/{changeset_id}/preview-undo", summary="What undoing this would do")
+async def preview_undo(
+    changeset_id: uuid.UUID,
+    service: Annotated[UndoService, Depends(_undo_service)],
+) -> dict[str, Any]:
+    """Per lead: reversible, conflicted, already-undone or deleted.
+
+    A read, so it is safe to call as often as the UI likes — the operator sees
+    the consequences before choosing.
+    """
+    preview = await service.preview_undo(changeset_id)
+    return preview.as_payload()
+
+
+@router.post("/changesets/{changeset_id}/undo", summary="Reverse a changeset")
+async def undo_changeset(
+    changeset_id: uuid.UUID,
+    payload: UndoRequest,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[UndoService, Depends(_undo_service)],
+) -> dict[str, Any]:
+    """Refuses with `409 undo_conflicts` unless the caller opted into skipping.
+
+    Gated on `bulk_edit`: an undo is a batch mutation, and the field-level Edit
+    grants still apply to every value it puts back.
+    """
+    _require(scope, "bulk_edit")
+    result = await service.undo(changeset_id, skip_conflicts=payload.skip_conflicts)
+    await scope.session.commit()
+    return result
 
 
 # --- message templates -------------------------------------------------------

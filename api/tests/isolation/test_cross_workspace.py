@@ -309,6 +309,72 @@ _M6_BODIES: dict[str, dict[str, object]] = {
 }
 
 
+# --- M7: bulk edit and undo ---------------------------------------------------
+
+M7_CHANGESET_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/changesets/{changeset_id}"),
+    ("POST", "/changesets/{changeset_id}/preview-undo"),
+    ("POST", "/changesets/{changeset_id}/undo"),
+]
+
+M7_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/leads/bulk"),
+]
+
+M7_TASK_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/tasks/{task_id}"),
+    ("PATCH", "/tasks/{task_id}"),
+    ("POST", "/tasks/{task_id}/complete"),
+    ("POST", "/tasks/{task_id}/reopen"),
+]
+
+M7_LABEL_ROUTES: list[tuple[str, str]] = [
+    ("PATCH", "/labels/{label_id}"),
+    ("DELETE", "/labels/{label_id}"),
+]
+
+M7_JOB_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/imports/{job_id}"),
+    ("PUT", "/imports/{job_id}/mapping"),
+    ("POST", "/imports/{job_id}/preview"),
+    ("POST", "/imports/{job_id}/commit"),
+]
+
+#: Routes taking both a lead id and a label id — the two-id shape that a naive
+#: scoping check passes and a real one has to resolve twice.
+M7_LEAD_LABEL_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/leads/{lead_id}/labels/{label_id}"),
+    ("DELETE", "/leads/{lead_id}/labels/{label_id}"),
+]
+
+M7_LEAD_CHILD_ROUTES: list[str] = [
+    "/leads/{lead_id}/tasks",
+    "/leads/{lead_id}/labels",
+]
+
+M7_COLLECTION_ROUTES: list[str] = [
+    "/tasks",
+    "/labels",
+    "/imports",
+    "/imports/fields",
+    "/tasks/counts",
+]
+
+_M7_BODIES: dict[str, dict[str, object]] = {
+    "/changesets/{changeset_id}/undo": {"skip_conflicts": True},
+    "/changesets/{changeset_id}/preview-undo": {},
+    "/leads/bulk": {
+        "lead_ids": ["00000000-0000-4000-8000-000000000001"],
+        "values": {"name": "Smuggled"},
+    },
+    "/tasks/{task_id}": {"title": "Renamed By An Outsider"},
+    "/tasks": {"title": "Smuggled", "due_at": "2026-09-01T09:00:00Z"},
+    "/labels/{label_id}": {"name": "Renamed By An Outsider"},
+    "/labels": {"name": "Smuggled"},
+    "/imports/{job_id}/mapping": {"mapping": {"Phone": "phone"}},
+}
+
+
 # --- 1. by direct id ---------------------------------------------------------
 
 
@@ -702,6 +768,15 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(M6_FILTER_ROUTES)
     declared.update(("GET", route) for route in M6_COLLECTION_ROUTES)
     declared.update(M6_COLLECTION_WRITE_ROUTES)
+    declared.update(M7_CHANGESET_ROUTES)
+    declared.update(M7_COLLECTION_WRITE_ROUTES)
+    declared.update(M7_TASK_ROUTES)
+    declared.update(M7_LABEL_ROUTES)
+    declared.update(M7_JOB_ROUTES)
+    declared.update(M7_LEAD_LABEL_ROUTES)
+    declared.update(("GET", route) for route in M7_LEAD_CHILD_ROUTES)
+    declared.update(("GET", route) for route in M7_COLLECTION_ROUTES)
+    declared.update({("POST", "/tasks"), ("POST", "/labels"), ("POST", "/imports")})
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

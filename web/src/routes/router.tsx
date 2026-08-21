@@ -5,6 +5,7 @@ import { CustomActionsPage } from '@/routes/CustomActionsPage'
 import { EditReportPage } from '@/routes/EditReportPage'
 import { FieldSettingsPage } from '@/routes/FieldSettingsPage'
 import { ImportPage } from '@/routes/ImportPage'
+import { IntegrationsPage } from '@/routes/IntegrationsPage'
 import { LeadsPage } from '@/routes/LeadsPage'
 import { LoginPage } from '@/routes/LoginPage'
 import { MembersPage } from '@/routes/MembersPage'
@@ -48,6 +49,7 @@ export const router = createBrowserRouter([
       { path: 'settings/permissions', element: <PermissionsPage /> },
       { path: 'settings/assignment', element: <AssignmentSettingsPage /> },
       { path: 'settings/scheduled-reports', element: <ScheduledReportsPage /> },
+      { path: 'settings/integrations', element: <IntegrationsPage /> },
       { path: 'status', element: <SystemStatusPage /> },
     ],
   },

@@ -627,6 +627,14 @@ export interface StubOptions {
   readonly assignmentRules?: Record<string, unknown>[]
   /** Scheduled reports the schedules screen lists. */
   readonly scheduledReports?: Record<string, unknown>[]
+  /** When false, every integrations endpoint answers 403. */
+  readonly integrationsAllowed?: boolean
+  /** Rows the outbound queue lists. */
+  readonly outboxEvents?: Record<string, unknown>[]
+  /** Rows the intake log lists. */
+  readonly intakeLog?: Record<string, unknown>[]
+  /** What `POST /settings/webhooks/{id}/test` answers. */
+  readonly webhookTest?: Record<string, unknown>
 }
 
 export interface StubHandle {
@@ -660,6 +668,12 @@ export interface StubHandle {
   readonly lastRule: () => Record<string, unknown> | null
   /** The id order of the last reorder call. */
   readonly lastReorder: () => string[] | null
+  /** The body of the last webhook create. */
+  readonly lastWebhook: () => Record<string, unknown> | null
+  /** The body of the last API-key create. */
+  readonly lastApiKey: () => Record<string, unknown> | null
+  /** Outbox ids that were redriven, in order. */
+  readonly retried: () => string[]
 }
 
 export interface LastSearch {
@@ -752,6 +766,89 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
     config?: Record<string, unknown>
     skip_unavailable?: boolean
   } | null = null
+  let apiKeys: Record<string, unknown>[] = [
+    {
+      id: 'key-1',
+      name: 'Website form',
+      prefix: 'crmk_existing',
+      permission_template_id: 'template-1',
+      last_used_at: '2026-08-20T09:00:00Z',
+      revoked_at: null,
+      created_at: '2026-08-01T09:00:00Z',
+    },
+  ]
+  let webhooks: Record<string, unknown>[] = [
+    {
+      id: 'hook-1',
+      name: 'Ops consumer',
+      url: 'https://ops.example.com/hook',
+      events: [],
+      permission_template_id: 'template-1',
+      is_active: true,
+      created_at: '2026-08-01T09:00:00Z',
+    },
+  ]
+  let outboxEvents: Record<string, unknown>[] = [
+    ...(options.outboxEvents ?? [
+      {
+        id: 'outbox-1',
+        event: 'lead.created',
+        event_id: 'ev-1',
+        endpoint_id: 'hook-1',
+        status: 'DEAD',
+        attempts: 8,
+        occurred_at: '2026-08-21T08:00:00Z',
+        next_attempt_at: '2026-08-21T09:00:00Z',
+        last_error: 'connection refused',
+        last_status_code: null,
+        delivered_at: null,
+      },
+      {
+        id: 'outbox-2',
+        event: 'lead.stage_changed',
+        event_id: 'ev-2',
+        endpoint_id: 'hook-1',
+        status: 'DELIVERED',
+        attempts: 1,
+        occurred_at: '2026-08-21T08:30:00Z',
+        next_attempt_at: '2026-08-21T08:30:00Z',
+        last_error: null,
+        last_status_code: 200,
+        delivered_at: '2026-08-21T08:30:01Z',
+      },
+    ]),
+  ]
+  const intakeLog: Record<string, unknown>[] = [
+    ...(options.intakeLog ?? [
+      {
+        id: 'intake-1',
+        api_key_id: 'key-1',
+        endpoint: 'leads',
+        outcome: 'CREATED',
+        status_code: 200,
+        warnings: ["unknown field 'utm_campaign' was stored as-is"],
+        lead_id: 'lead-1',
+        error: null,
+        created_at: '2026-08-21T08:00:00Z',
+        request_body: {},
+      },
+      {
+        id: 'intake-2',
+        api_key_id: 'key-1',
+        endpoint: 'leads',
+        outcome: 'REJECTED',
+        status_code: 400,
+        warnings: [],
+        lead_id: null,
+        error: "No stage called 'Nowhere'",
+        created_at: '2026-08-21T08:05:00Z',
+        request_body: {},
+      },
+    ]),
+  ]
+  const retriedIds: string[] = []
+  let lastWebhookBody: Record<string, unknown> | null = null
+  let lastApiKeyBody: Record<string, unknown> | null = null
   let lastRuleBody: Record<string, unknown> | null = null
   let lastReorderBody: string[] | null = null
   let accessTokenExpired = false
@@ -1064,6 +1161,111 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
         is_readonly: isRoot,
         capabilities: { leads: { admin_access: isRoot } },
       })
+    }
+
+    // --- M10: integrations -------------------------------------------------
+    if (
+      options.integrationsAllowed === false &&
+      (path.includes('/api-keys') ||
+        path.includes('/webhooks') ||
+        path.includes('/outbox') ||
+        path.includes('/intake-log'))
+    ) {
+      return apiError(route, 403, 'insufficient_permissions')
+    }
+
+    if (path.endsWith('/settings/api-keys') && method === 'GET') {
+      return json(route, 200, apiKeys)
+    }
+    if (path.endsWith('/settings/api-keys') && method === 'POST') {
+      lastApiKeyBody = route.request().postDataJSON() as Record<string, unknown>
+      const created = {
+        id: `key-${apiKeys.length + 1}`,
+        prefix: 'crmk_abc123',
+        last_used_at: null,
+        revoked_at: null,
+        created_at: '2026-08-21T09:00:00Z',
+        ...lastApiKeyBody,
+      }
+      apiKeys = [...apiKeys, created]
+      // The plaintext appears here and nowhere else, exactly as the API does.
+      return json(route, 201, { ...created, key: 'crmk_abc123-the-only-time-you-see-this' })
+    }
+    if (/\/settings\/api-keys\/[^/]+$/.test(path) && method === 'DELETE') {
+      const id = path.split('/').pop()
+      apiKeys = apiKeys.map((k) =>
+        k['id'] === id ? { ...k, revoked_at: '2026-08-21T10:00:00Z' } : k,
+      )
+      return json(route, 204, null)
+    }
+
+    if (path.endsWith('/settings/webhooks/events')) {
+      return json(route, 200, [
+        'action.created',
+        'lead.assigned',
+        'lead.created',
+        'lead.field_changed',
+        'lead.stage_changed',
+        'lead.updated',
+        'task.completed',
+        'task.created',
+      ])
+    }
+    if (path.endsWith('/settings/webhooks') && method === 'GET') {
+      return json(route, 200, webhooks)
+    }
+    if (path.endsWith('/settings/webhooks') && method === 'POST') {
+      lastWebhookBody = route.request().postDataJSON() as Record<string, unknown>
+      const created = {
+        id: `hook-${webhooks.length + 1}`,
+        is_active: true,
+        created_at: '2026-08-21T09:00:00Z',
+        ...lastWebhookBody,
+      }
+      webhooks = [...webhooks, created]
+      return json(route, 201, { ...created, secret: 'whsec_only-shown-once' })
+    }
+    if (/\/settings\/webhooks\/[^/]+\/test$/.test(path)) {
+      return json(
+        route,
+        200,
+        options.webhookTest ?? {
+          delivered: true,
+          status_code: 200,
+          error: null,
+          signature: 'sha256=deadbeef',
+        },
+      )
+    }
+    if (/\/settings\/webhooks\/[^/]+$/.test(path) && method === 'DELETE') {
+      const id = path.split('/').pop()
+      webhooks = webhooks.map((h) => (h['id'] === id ? { ...h, is_active: false } : h))
+      return json(route, 204, null)
+    }
+
+    if (path.endsWith('/settings/outbox')) {
+      const wanted = new URL(route.request().url()).searchParams.get('status')
+      const items = wanted ? outboxEvents.filter((e) => e['status'] === wanted) : outboxEvents
+      return json(route, 200, { items, total: items.length, limit: 50, offset: 0 })
+    }
+    if (/\/settings\/outbox\/[^/]+\/retry$/.test(path)) {
+      const id = path.split('/').slice(-2)[0] ?? ''
+      retriedIds.push(id)
+      outboxEvents = outboxEvents.map((e) =>
+        e['id'] === id ? { ...e, status: 'PENDING', attempts: 0, last_error: null } : e,
+      )
+      return json(
+        route,
+        200,
+        outboxEvents.find((e) => e['id'] === id),
+      )
+    }
+
+    if (path.endsWith('/settings/intake-log')) {
+      const rejectedOnly =
+        new URL(route.request().url()).searchParams.get('rejected_only') === 'true'
+      const items = rejectedOnly ? intakeLog.filter((e) => e['outcome'] === 'REJECTED') : intakeLog
+      return json(route, 200, { items, total: items.length, limit: 50, offset: 0 })
     }
 
     // --- M8: routing and scheduling ---------------------------------------
@@ -1612,6 +1814,9 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
     lastDistribute: () => lastDistributeBody,
     lastRule: () => lastRuleBody,
     lastReorder: () => lastReorderBody,
+    lastWebhook: () => lastWebhookBody,
+    lastApiKey: () => lastApiKeyBody,
+    retried: () => retriedIds,
     expireAccessToken: () => {
       accessTokenExpired = true
     },

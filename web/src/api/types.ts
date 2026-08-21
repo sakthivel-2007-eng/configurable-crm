@@ -335,6 +335,14 @@ export interface CapabilitySchema {
  */
 export type TemplateCapabilities = Record<string, unknown>
 
+/** The list shape of a permission template. Shared by Team and Integrations. */
+export interface PermissionTemplateSummary {
+  readonly id: string
+  readonly name: string
+  readonly is_system: boolean
+  readonly is_readonly: boolean
+}
+
 export interface PermissionTemplateDetail {
   readonly id: string
   readonly name: string
@@ -779,4 +787,79 @@ export interface RecurringOccurrence {
   readonly identity_value: string
   readonly field_key: string
   readonly occurs_on: string
+}
+
+// --- M10: intake and the event bus ------------------------------------------
+
+export interface ApiKey {
+  readonly id: string
+  readonly name: string
+  /** The only plaintext kept — identifies a key without reproducing it. */
+  readonly prefix: string
+  readonly permission_template_id: string
+  readonly last_used_at: string | null
+  readonly revoked_at: string | null
+  readonly created_at: string
+}
+
+/** The one and only response that carries the plaintext key. */
+export interface ApiKeyCreated extends ApiKey {
+  readonly key: string
+}
+
+export interface WebhookEndpoint {
+  readonly id: string
+  readonly name: string
+  readonly url: string
+  /** Empty means every event. */
+  readonly events: readonly string[]
+  /** Whose field permissions the payload is projected through. */
+  readonly permission_template_id: string
+  readonly is_active: boolean
+  readonly created_at: string
+}
+
+/** Carries the signing secret. Shown once, like a key. */
+export interface WebhookCreated extends WebhookEndpoint {
+  readonly secret: string
+}
+
+export interface WebhookTestResult {
+  readonly delivered: boolean
+  readonly status_code: number | null
+  readonly error: string | null
+  readonly signature: string
+}
+
+export type OutboxStatus = 'PENDING' | 'DELIVERING' | 'DELIVERED' | 'FAILED' | 'DEAD'
+
+export interface OutboxEvent {
+  readonly id: string
+  readonly event: string
+  /** Stable across retries — the consumer's dedupe key. */
+  readonly event_id: string
+  readonly endpoint_id: string
+  readonly status: OutboxStatus
+  readonly attempts: number
+  readonly occurred_at: string
+  readonly next_attempt_at: string
+  readonly last_error: string | null
+  readonly last_status_code: number | null
+  readonly delivered_at: string | null
+}
+
+export type IntakeOutcome = 'CREATED' | 'UPDATED' | 'SKIPPED' | 'REJECTED'
+
+export interface IntakeLogEntry {
+  readonly id: string
+  readonly api_key_id: string | null
+  readonly endpoint: string
+  readonly outcome: IntakeOutcome
+  readonly status_code: number
+  /** Unknown fields stored, quarantined templates, an unrecognised assignee. */
+  readonly warnings: readonly string[]
+  readonly lead_id: string | null
+  readonly error: string | null
+  readonly created_at: string
+  readonly request_body: Record<string, unknown>
 }

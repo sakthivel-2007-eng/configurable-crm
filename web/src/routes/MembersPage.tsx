@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { api, ApiError } from '@/api/client'
-import type { AvailabilityStatus, MemberDetail } from '@/api/types'
+import type { AvailabilityStatus, MemberDetail, PermissionTemplateSummary } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -19,13 +19,6 @@ import {
 import { BulkUploadDialog } from '@/features/members/BulkUploadDialog'
 import { DeactivateDialog } from '@/features/members/DeactivateDialog'
 import { InviteDialog } from '@/features/members/InviteDialog'
-
-interface PermissionTemplateSummary {
-  readonly id: string
-  readonly name: string
-  readonly is_system: boolean
-  readonly is_readonly: boolean
-}
 
 const AVAILABILITY_LABELS: Record<AvailabilityStatus, string> = {
   WORKING: 'Working',

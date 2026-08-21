@@ -21,6 +21,7 @@ const NAV_LINKS = [
   { to: '/settings/permissions', label: 'Permissions' },
   { to: '/settings/assignment', label: 'Assignment' },
   { to: '/settings/scheduled-reports', label: 'Schedules' },
+  { to: '/settings/integrations', label: 'Integrations' },
   { to: '/status', label: 'System' },
 ] as const
 

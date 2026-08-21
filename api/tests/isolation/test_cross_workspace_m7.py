@@ -20,6 +20,7 @@ from tests.isolation.test_cross_workspace import (
     M7_CHANGESET_ROUTES,
     M7_COLLECTION_ROUTES,
     M7_COLLECTION_WRITE_ROUTES,
+    M7_EXPORT_ROUTES,
     M7_JOB_ROUTES,
     M7_LABEL_ROUTES,
     M7_TASK_ROUTES,
@@ -319,3 +320,64 @@ async def test_a_task_cannot_be_assigned_to_a_foreign_member(
         },
     )
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize(("method", "template"), M7_EXPORT_ROUTES)
+async def test_export_download_in_another_workspace_returns_404(
+    api: AsyncClient, tenants: TenantPair, method: str, template: str
+) -> None:
+    """An export file *is* one workspace's customer data, in one object.
+
+    Of everything in M7 this is the leak that would hand over the most at once,
+    so the id is resolved through the scope like any other row.
+    """
+    await _lead_in(api, tenants, "b", "9991000001")
+    started = await api.post(tenants.b.path("/leads/export"), headers=tenants.b.owner.auth, json={})
+    assert started.status_code == 200, started.text
+    foreign_job = started.json()["job_id"]
+
+    response = await api.request(
+        method,
+        tenants.a.path(template.format(job_id=foreign_job)),
+        headers=tenants.a.owner.auth,
+    )
+    assert response.status_code == 404, response.text
+
+
+async def test_a_merge_cannot_pull_in_a_foreign_lead(api: AsyncClient, tenants: TenantPair) -> None:
+    """Merging moves a lead's whole timeline onto the primary.
+
+    Across the boundary that would copy B's calls and notes into A and then
+    soft-delete B's record — a leak and a destruction in one call.
+    """
+    mine = await _lead_in(api, tenants, "a", "9992000001")
+    foreign = await _lead_in(api, tenants, "b", "9992000002")
+
+    response = await api.post(
+        tenants.a.path("/leads/merge"),
+        headers=tenants.a.owner.auth,
+        json={"primary_id": mine["id"], "merge_ids": [foreign["id"]]},
+    )
+    assert response.status_code == 404, response.text
+
+    # B's lead is untouched and still readable by B.
+    check = await api.get(tenants.b.path(f"/leads/{foreign['id']}"), headers=tenants.b.owner.auth)
+    assert check.status_code == 200
+
+
+async def test_duplicates_never_mention_another_workspaces_leads(
+    api: AsyncClient, tenants: TenantPair
+) -> None:
+    """Two workspaces can hold the same phone number legitimately.
+
+    Grouping across the boundary would tell A that B has a customer in common —
+    which is exactly the kind of inference tenancy exists to prevent.
+    """
+    shared_number = "9993000001"
+    await _lead_in(api, tenants, "a", shared_number)
+    foreign = await _lead_in(api, tenants, "b", shared_number)
+
+    response = await api.get(tenants.a.path("/leads/duplicates"), headers=tenants.a.owner.auth)
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+    assert foreign["id"] not in response.text

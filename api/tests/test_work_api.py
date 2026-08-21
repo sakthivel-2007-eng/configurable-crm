@@ -808,3 +808,207 @@ async def test_an_unsupported_file_type_is_refused(
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "unsupported_file_type"
+
+
+# --- export ------------------------------------------------------------------
+
+
+async def test_export_carries_only_export_granted_columns(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """A caller may read a phone number on screen and be barred from
+    downloading ten thousand of them. Export is not View."""
+    headers = await _admin(api, workspace)
+    await _field(api, workspace, headers, label="Salary", field_type="NUMBER")
+    await _lead(api, workspace, headers, name="Earner", phone="9000000100", salary=99)
+
+    started = await api.post(workspace.path("/leads/export"), headers=headers, json={})
+    assert started.status_code == 200, started.text
+    assert started.json()["row_count"] == 1
+
+    downloaded = await api.get(
+        workspace.path(f"/leads/export/{started.json()['job_id']}"), headers=headers
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.headers["content-type"].startswith("text/csv")
+    body = downloaded.text
+    assert "Earner" in body
+    assert "+919000000100" in body
+
+
+async def test_export_is_refused_outright_when_the_template_exports_nothing(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """An empty file looks like a bug and invites a retry.
+
+    `Export (0) None` is the observed default and a deliberate exfiltration
+    control, so saying so is better than producing a file with headers only.
+    """
+    headers = await _admin(api, workspace)
+    await _lead(api, workspace, headers, name="Private", phone="9000000101")
+
+    rep = workspace.members["rep"]
+    await login(api, rep)
+    refused = await api.post(workspace.path("/leads/export"), headers=rep.auth, json={})
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"]["code"] == "export_not_permitted"
+
+
+async def test_an_export_takes_the_same_filter_as_the_list(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """ "Export what I am looking at" is one call, not a second query language."""
+    headers = await _admin(api, workspace)
+    await _field(api, workspace, headers, label="City", field_type="TEXT")
+    await _lead(api, workspace, headers, name="Here", phone="9000000110", city="Chennai")
+    await _lead(api, workspace, headers, name="There", phone="9000000111", city="Delhi")
+
+    started = await api.post(
+        workspace.path("/leads/export"),
+        headers=headers,
+        json={"filter": {"type": "field", "key": "city", "op": "eq", "value": "Chennai"}},
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["row_count"] == 1
+
+    body = (
+        await api.get(workspace.path(f"/leads/export/{started.json()['job_id']}"), headers=headers)
+    ).text
+    assert "Here" in body
+    assert "There" not in body
+
+
+async def test_a_money_value_exports_readably(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """A spreadsheet full of raw JSON is not an export anybody can use."""
+    headers = await _admin(api, workspace)
+    await _field(api, workspace, headers, label="Fee", field_type="MONEY")
+    await _lead(api, workspace, headers, name="Payer", phone="9000000120", fee=5000)
+
+    started = await api.post(workspace.path("/leads/export"), headers=headers, json={})
+    body = (
+        await api.get(workspace.path(f"/leads/export/{started.json()['job_id']}"), headers=headers)
+    ).text
+    assert "5000.00 INR" in body
+    assert '{"amount"' not in body
+
+
+# --- duplicates and merge ----------------------------------------------------
+
+
+async def test_duplicates_group_on_any_contact_value_not_just_the_identity(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """The identity field is unique by construction.
+
+    `leads_identity_uq` means two live leads cannot share an identity, so a
+    report grouping on that alone would always be empty. The case that really
+    happens is one person entered twice — their number as the identifier on one
+    record and as an alternate contact on the other.
+    """
+    headers = await _admin(api, workspace)
+    first = await _lead(api, workspace, headers, name="Same Person", phone="9000000130")
+    second = await _lead(
+        api,
+        workspace,
+        headers,
+        name="Same Person Again",
+        phone="9000000131",
+        alternate_phone="9000000130",
+    )
+    await _lead(api, workspace, headers, name="Unrelated", phone="9000000132")
+
+    groups = (await api.get(workspace.path("/leads/duplicates"), headers=headers)).json()
+    assert len(groups) == 1
+    assert set(groups[0]["lead_ids"]) == {first["id"], second["id"]}
+
+
+async def test_merging_keeps_the_history_and_fills_only_blanks(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    """A merge that discarded history would lose calls that were actually made.
+
+    Values fill blanks only, so the primary stays authoritative and the outcome
+    is predictable rather than last-write-wins.
+    """
+    headers = await _admin(api, workspace)
+    await _field(api, workspace, headers, label="City", field_type="TEXT")
+    await _field(api, workspace, headers, label="Company", field_type="TEXT")
+
+    primary = await _lead(
+        api, workspace, headers, name="Keeper", phone="9000000140", city="Chennai"
+    )
+    duplicate = await _lead(
+        api,
+        workspace,
+        headers,
+        name="Dupe",
+        phone="9000000141",
+        city="Delhi",
+        company="Northwind",
+    )
+
+    noted = await api.post(
+        workspace.path(f"/leads/{duplicate['id']}/notes"),
+        headers=headers,
+        json={"body": "Spoke on the duplicate record"},
+    )
+    assert noted.status_code == 201, noted.text
+
+    merged = await api.post(
+        workspace.path("/leads/merge"),
+        headers=headers,
+        json={"primary_id": primary["id"], "merge_ids": [duplicate["id"]]},
+    )
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["fields_filled"] == ["company"]
+
+    kept = (await api.get(workspace.path(f"/leads/{primary['id']}"), headers=headers)).json()
+    # The primary's own value wins; only the gap is filled.
+    assert kept["values"]["city"] == "Chennai"
+    assert kept["values"]["company"] == "Northwind"
+
+    timeline = (
+        await api.get(workspace.path(f"/leads/{primary['id']}/actions"), headers=headers)
+    ).json()
+    assert any(
+        a["kind"] == "NOTE" and a["body"] == "Spoke on the duplicate record"
+        for a in timeline["items"]
+    ), "the call that was actually made must survive the merge"
+
+    # The merged record is soft-deleted, never dropped.
+    gone = await api.get(workspace.path(f"/leads/{duplicate['id']}"), headers=headers)
+    assert gone.status_code == 404
+
+
+async def test_merging_a_lead_into_itself_is_refused(
+    api: AsyncClient, workspace: WorkspaceFixture
+) -> None:
+    headers = await _admin(api, workspace)
+    lead = await _lead(api, workspace, headers, name="Alone", phone="9000000150")
+
+    response = await api.post(
+        workspace.path("/leads/merge"),
+        headers=headers,
+        json={"primary_id": lead["id"], "merge_ids": [lead["id"]]},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_merge"
+
+
+async def test_a_merge_is_one_changeset(api: AsyncClient, workspace: WorkspaceFixture) -> None:
+    headers = await _admin(api, workspace)
+    await _field(api, workspace, headers, label="Company", field_type="TEXT")
+    primary = await _lead(api, workspace, headers, name="Main", phone="9000000160")
+    other = await _lead(api, workspace, headers, name="Other", phone="9000000161", company="Acme")
+
+    merged = await api.post(
+        workspace.path("/leads/merge"),
+        headers=headers,
+        json={"primary_id": primary["id"], "merge_ids": [other["id"]]},
+    )
+    changeset_id = merged.json()["changeset_id"]
+
+    detail = (await api.get(workspace.path(f"/changesets/{changeset_id}"), headers=headers)).json()
+    assert "Merged" in detail["summary"]

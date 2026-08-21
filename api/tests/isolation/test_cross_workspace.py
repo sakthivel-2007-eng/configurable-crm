@@ -319,6 +319,14 @@ M7_CHANGESET_ROUTES: list[tuple[str, str]] = [
 
 M7_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
     ("POST", "/leads/bulk"),
+    ("POST", "/leads/export"),
+    ("POST", "/leads/merge"),
+]
+
+#: An export job holds a file of one workspace's customer data. Reaching one
+#: across the boundary would download it.
+M7_EXPORT_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/leads/export/{job_id}"),
 ]
 
 M7_TASK_ROUTES: list[tuple[str, str]] = [
@@ -372,6 +380,11 @@ _M7_BODIES: dict[str, dict[str, object]] = {
     "/labels/{label_id}": {"name": "Renamed By An Outsider"},
     "/labels": {"name": "Smuggled"},
     "/imports/{job_id}/mapping": {"mapping": {"Phone": "phone"}},
+    "/leads/export": {},
+    "/leads/merge": {
+        "primary_id": "00000000-0000-4000-8000-000000000001",
+        "merge_ids": ["00000000-0000-4000-8000-000000000002"],
+    },
 }
 
 
@@ -773,6 +786,8 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(M7_TASK_ROUTES)
     declared.update(M7_LABEL_ROUTES)
     declared.update(M7_JOB_ROUTES)
+    declared.update(M7_EXPORT_ROUTES)
+    declared.update({("GET", "/leads/duplicates")})
     declared.update(M7_LEAD_LABEL_ROUTES)
     declared.update(("GET", route) for route in M7_LEAD_CHILD_ROUTES)
     declared.update(("GET", route) for route in M7_COLLECTION_ROUTES)

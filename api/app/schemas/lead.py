@@ -150,3 +150,14 @@ class UndoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     skip_conflicts: bool = False
+
+
+class LeadMerge(BaseModel):
+    """`POST /leads/merge` — fold duplicates into one record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary_id: uuid.UUID
+    #: Bounded: merging dozens at once is a sign the duplicate detection needs
+    #: fixing rather than a bigger batch button.
+    merge_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)

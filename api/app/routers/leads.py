@@ -15,7 +15,7 @@ import datetime as dt
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy import func, select
 
 from app.errors import api_error, not_found
@@ -32,12 +32,14 @@ from app.schemas.lead import (
     CustomActionLog,
     LeadBulkUpdate,
     LeadCreate,
+    LeadMerge,
     LeadUpdate,
     MessageTemplateCreate,
     NoteCreate,
     TemplateRenderRequest,
     UndoRequest,
 )
+from app.services.exporting import ExportService
 from app.services.leads import LeadService, QuickFilters
 from app.services.templates import MessageTemplateService
 from app.services.undo import UndoService
@@ -73,6 +75,23 @@ async def _undo_service(
         actor_id=scope.membership_id,
         visible_membership_ids=scope.visible_membership_ids,
         sees_all=scope.sees_all_members,
+    )
+
+
+async def _export_service(request: Request, scope: WorkspaceScope) -> ExportService:
+    """Built inline rather than as a dependency.
+
+    It needs both the request (for the S3 client on app state) and an already
+    resolved scope, and three endpoints share it — a `Depends` wrapper would be
+    the same three lines with an extra layer.
+    """
+    return ExportService(
+        scope.session,
+        workspace=scope.workspace,
+        projection=await scope.projection(),
+        actor_id=scope.membership_id,
+        storage=getattr(request.app.state, "s3", None),
+        bucket=request.app.state.settings.s3_bucket,
     )
 
 
@@ -196,6 +215,81 @@ async def bulk_update_leads(
         "summary": changeset.summary,
         "leads_updated": len(leads),
     }
+
+
+@router.post("/leads/export", summary="Export the Export-granted columns")
+async def export_leads(
+    payload: LeadSearchRequest,
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[LeadService, Depends(_lead_service)],
+) -> dict[str, Any]:
+    """Refused outright when the template exports nothing.
+
+    An empty file looks like a bug and invites a retry; `403 nothing_exportable`
+    says what is actually wrong. `Export (0) None` is the observed default and a
+    deliberate exfiltration control, not an oversight to work around.
+
+    Takes the same filter document the list does, so "export what I am looking
+    at" is one call rather than a second query language.
+    """
+    exporter = await _export_service(request, scope)
+    clause = await service.compile_filter(payload.filter)
+    job = await exporter.export(clause=clause)
+    await scope.session.commit()
+    return {
+        "job_id": str(job.id),
+        "filename": job.filename,
+        "row_count": job.row_count,
+        "columns": job.result.get("columns", []),
+    }
+
+
+@router.get("/leads/export/{job_id}", summary="Download a finished export")
+async def download_export(
+    job_id: uuid.UUID,
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> Response:
+    exporter = await _export_service(request, scope)
+    filename, content = await exporter.download(job_id)
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/leads/duplicates", summary="Leads that look like the same person")
+async def lead_duplicates(
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[dict[str, Any]]:
+    """Grouped on every phone and email the workspace holds, not on the identity
+    field alone — that one is unique by construction, so grouping on it would
+    always return nothing."""
+    exporter = await _export_service(request, scope)
+    groups = await exporter.duplicates(limit=limit)
+    return [group.as_payload() for group in groups]
+
+
+@router.post("/leads/merge", summary="Fold several leads into one")
+async def merge_leads(
+    payload: LeadMerge,
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> dict[str, Any]:
+    """Timeline, tasks and labels move to the primary; the others are soft-deleted.
+
+    Values fill blanks only: the primary's own data stays authoritative, which
+    makes the outcome predictable rather than last-write-wins.
+    """
+    _require(scope, "merge_leads")
+    exporter = await _export_service(request, scope)
+    result = await exporter.merge(primary_id=payload.primary_id, merge_ids=payload.merge_ids)
+    await scope.session.commit()
+    return result
 
 
 @router.post("/leads", status_code=status.HTTP_201_CREATED, summary="Create a lead")

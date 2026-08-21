@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import AssignmentStrategy
+from app.models.enums import AssignmentStrategy, ScheduledReportFormat
 
 __all__ = [
     "AssignmentPreviewRead",
@@ -18,11 +18,15 @@ __all__ = [
     "AssignmentRuleUpdate",
     "DistributeRequest",
     "DistributionRead",
+    "OccurrenceRead",
     "SalesGroupCreate",
     "SalesGroupMemberRead",
     "SalesGroupMemberWrite",
     "SalesGroupRead",
     "SalesGroupUpdate",
+    "ScheduledReportCreate",
+    "ScheduledReportRead",
+    "ScheduledReportUpdate",
 ]
 
 
@@ -143,3 +147,57 @@ class DistributionRead(BaseModel):
     #: Already with that member, so nothing was written and nothing to undo.
     skipped: int
     total: int
+
+
+class ScheduledReportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    #: M8 renders `leads`; M9 extends the catalogue.
+    report_type: str = Field(min_length=1, max_length=40)
+    #: Five-field cron, evaluated in the *workspace's* timezone.
+    cron: str = Field(min_length=1, max_length=120)
+    recipients: list[str] = Field(min_length=1, max_length=25)
+    params: dict[str, Any] = Field(default_factory=dict)
+    format: ScheduledReportFormat = ScheduledReportFormat.CSV
+
+
+class ScheduledReportUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    report_type: str | None = Field(default=None, min_length=1, max_length=40)
+    cron: str | None = Field(default=None, min_length=1, max_length=120)
+    recipients: list[str] | None = Field(default=None, min_length=1, max_length=25)
+    params: dict[str, Any] | None = None
+    format: ScheduledReportFormat | None = None
+    is_active: bool | None = None
+
+
+class ScheduledReportRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    report_type: str
+    cron: str
+    recipients: list[str]
+    params: dict[str, Any]
+    format: ScheduledReportFormat
+    is_active: bool
+    last_run_at: dt.datetime | None
+    #: Surfaced so a broken schedule is visible in settings rather than failing
+    #: quietly every morning.
+    last_error: str | None
+    #: Whose field permissions the render uses. Null means the creator has left
+    #: and the schedule cannot run.
+    created_by: uuid.UUID | None
+
+
+class OccurrenceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    lead_id: uuid.UUID
+    identity_value: str
+    field_key: str
+    occurs_on: dt.date

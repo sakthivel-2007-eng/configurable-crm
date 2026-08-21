@@ -11,10 +11,11 @@ is not thereby allowed to redirect every incoming lead.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.errors import api_error
 from app.schemas.routing import (
@@ -25,17 +26,23 @@ from app.schemas.routing import (
     AssignmentRuleUpdate,
     DistributeRequest,
     DistributionRead,
+    OccurrenceRead,
     SalesGroupCreate,
     SalesGroupMemberRead,
     SalesGroupMemberWrite,
     SalesGroupRead,
     SalesGroupUpdate,
+    ScheduledReportCreate,
+    ScheduledReportRead,
+    ScheduledReportUpdate,
 )
+from app.services.email import build_sender
 from app.services.routing import (
     AssignmentRuleService,
     DistributionService,
     SalesGroupService,
 )
+from app.services.scheduling import RecurringDateService, ScheduledReportService
 from app.tenancy.scoping import WorkspaceScope, require_workspace
 
 router = APIRouter(tags=["routing"])
@@ -294,3 +301,137 @@ async def distribute_leads(
         skipped=result.skipped,
         total=result.total,
     )
+
+
+# --- scheduled reports -------------------------------------------------------
+
+
+def _schedules(scope: WorkspaceScope, request: Request) -> ScheduledReportService:
+    """Built with whatever sender the app was wired with.
+
+    Local and test runs get the recording sender, so nothing can mail a real
+    address from a laptop. See `services/email.py`.
+    """
+    sender = getattr(request.app.state, "email_sender", None)
+    if sender is None:
+        sender = build_sender(request.app.state.settings)
+    return ScheduledReportService(scope.session, workspace=scope.workspace, sender=sender)
+
+
+@router.get(
+    "/scheduled-reports",
+    response_model=list[ScheduledReportRead],
+    summary="Scheduled reports",
+)
+async def list_scheduled_reports(
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    request: Request,
+) -> list[ScheduledReportRead]:
+    _require(scope, "reports", "schedule_reports")
+    reports = await _schedules(scope, request).list_reports()
+    return [ScheduledReportRead.model_validate(report) for report in reports]
+
+
+@router.post(
+    "/scheduled-reports",
+    response_model=ScheduledReportRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Schedule a report",
+)
+async def create_scheduled_report(
+    body: ScheduledReportCreate,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    request: Request,
+) -> ScheduledReportRead:
+    """The creating member's field permissions govern what the email contains."""
+    _require(scope, "reports", "schedule_reports")
+    report = await _schedules(scope, request).create(
+        name=body.name,
+        report_type=body.report_type,
+        cron=body.cron,
+        recipients=body.recipients,
+        params=body.params,
+        format=body.format,
+        created_by=scope.membership_id,
+    )
+    await scope.session.commit()
+    return ScheduledReportRead.model_validate(report)
+
+
+@router.patch(
+    "/scheduled-reports/{report_id}",
+    response_model=ScheduledReportRead,
+    summary="Update a scheduled report",
+)
+async def update_scheduled_report(
+    report_id: uuid.UUID,
+    body: ScheduledReportUpdate,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    request: Request,
+) -> ScheduledReportRead:
+    _require(scope, "reports", "schedule_reports")
+    report = await _schedules(scope, request).update(
+        report_id, **body.model_dump(exclude_unset=True)
+    )
+    await scope.session.commit()
+    return ScheduledReportRead.model_validate(report)
+
+
+@router.delete(
+    "/scheduled-reports/{report_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Deactivate a scheduled report",
+)
+async def delete_scheduled_report(
+    report_id: uuid.UUID,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    request: Request,
+) -> None:
+    _require(scope, "reports", "schedule_reports")
+    await _schedules(scope, request).delete(report_id)
+    await scope.session.commit()
+
+
+@router.post(
+    "/scheduled-reports/{report_id}/run-now",
+    response_model=ScheduledReportRead,
+    summary="Send a scheduled report immediately",
+)
+async def run_scheduled_report_now(
+    report_id: uuid.UUID,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    request: Request,
+) -> ScheduledReportRead:
+    """Still renders as the schedule's creator, not as the caller.
+
+    An admin pressing "send now" on somebody else's schedule must not thereby
+    widen what the recipients receive.
+    """
+    _require(scope, "reports", "schedule_reports")
+    service = _schedules(scope, request)
+    report = await service.get(report_id)
+    await service.send_now(report, now=dt.datetime.now(dt.UTC))
+    await scope.session.commit()
+    return ScheduledReportRead.model_validate(report)
+
+
+# --- recurring dates ---------------------------------------------------------
+
+
+@router.get(
+    "/recurring-dates/occurrences",
+    response_model=list[OccurrenceRead],
+    summary="Upcoming occurrences of a recurring-date field",
+)
+async def recurring_date_occurrences(
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    field_key: Annotated[str, Query(max_length=64)],
+    from_: Annotated[dt.date, Query(alias="from")],
+    to: Annotated[dt.date, Query()],
+) -> list[OccurrenceRead]:
+    """The greeting scheduler's input, and the birthday list a manager wants."""
+    _require(scope, "leads", "search")
+    rows = await RecurringDateService(scope.session).occurrences(
+        field_key=field_key, start=from_, end=to
+    )
+    return [OccurrenceRead.model_validate(row) for row in rows]

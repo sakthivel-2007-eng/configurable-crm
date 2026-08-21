@@ -91,6 +91,28 @@ class Settings(BaseSettings):
     # --- Health ------------------------------------------------------------
     health_check_timeout_seconds: float = 5.0
 
+    # --- Outbound email (M8) -----------------------------------------------
+    # Scheduled reports and recurring-date greetings both need a transport.
+    # With no host configured the sender is a no-op that records what it would
+    # have sent: local development must not be able to mail a real customer,
+    # and a test suite that silently needed an SMTP server would be worse.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    smtp_from_address: str = "no-reply@example.invalid"
+    smtp_timeout_seconds: float = 15.0
+
+    # --- Scheduler (M8) ----------------------------------------------------
+    #: How often the cron tick runs. A schedule is due if its cron matched at
+    #: any point since the last tick, so this is a resolution knob rather than
+    #: a correctness one.
+    scheduler_tick_seconds: int = 60
+    #: A schedule that has not run in this long is caught up once, not once per
+    #: missed occurrence — nobody wants 300 backdated reports after an outage.
+    scheduler_max_catchup_hours: int = 24
+
     @field_validator("database_url")
     @classmethod
     def _require_async_driver(cls, value: str) -> str:

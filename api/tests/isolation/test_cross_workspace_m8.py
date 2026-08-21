@@ -23,6 +23,7 @@ from tests.isolation.test_cross_workspace import (
     M8_COLLECTION_WRITE_ROUTES,
     M8_GROUP_ROUTES,
     M8_RULE_ROUTES,
+    M8_SCHEDULE_ROUTES,
 )
 
 pytestmark = pytest.mark.integration
@@ -194,3 +195,80 @@ async def test_a_rule_cannot_target_a_membership_from_another_workspace(
     # The engine's eligibility check is a scoped read, so B's membership is not
     # a member here and the lead stays unassigned rather than leaving the tenant.
     assert lead.json()["assignee_id"] is None
+
+
+async def _schedule_in_b(api: AsyncClient, tenants: TenantPair) -> str:
+    response = await api.post(
+        tenants.b.path("/scheduled-reports"),
+        headers=tenants.b.owner.auth,
+        json={
+            "name": "B's daily",
+            "report_type": "leads",
+            "cron": "0 9 * * *",
+            "recipients": ["b-ops@example.com"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return str(response.json()["id"])
+
+
+@pytest.mark.parametrize(("method", "template"), M8_SCHEDULE_ROUTES)
+async def test_a_scheduled_report_id_from_another_workspace_is_a_404(
+    api: AsyncClient, tenants: TenantPair, method: str, template: str
+) -> None:
+    """A leaked schedule id is an exfiltration primitive, not just a config leak.
+
+    `run-now` renders another workspace's leads and mails them — to whatever
+    recipients the attacker's PATCH put on the row first. Both halves have to
+    404 on the id alone.
+    """
+    report_id = await _schedule_in_b(api, tenants)
+    path = tenants.a.path(template.format(report_id=report_id))
+    body = _M8_BODIES.get(template)
+
+    kwargs: dict[str, object] = {"headers": tenants.a.owner.auth}
+    if body is not None:
+        kwargs["json"] = body
+
+    response = await api.request(method, path, **kwargs)  # type: ignore[arg-type]
+    assert response.status_code == 404, f"{method} {template} leaked: {response.text}"
+
+    check = await api.get(tenants.b.path("/scheduled-reports"), headers=tenants.b.owner.auth)
+    assert check.status_code == 200
+    rows = {r["id"]: r for r in check.json()}
+    assert rows[report_id]["name"] == "B's daily"
+    assert rows[report_id]["recipients"] == ["b-ops@example.com"]
+
+
+async def test_recurring_date_occurrences_never_cross_a_workspace_boundary(
+    api: AsyncClient, tenants: TenantPair
+) -> None:
+    field = await api.post(
+        tenants.b.path("/settings/lead-fields"),
+        headers=tenants.b.owner.auth,
+        json={"label": "Anniversary", "field_type": "RECURRING_DATE"},
+    )
+    assert field.status_code == 201, field.text
+    key = field.json()["key"]
+
+    lead = await api.post(
+        tenants.b.path("/leads"),
+        headers=tenants.b.owner.auth,
+        json={
+            "values": {
+                "name": "B's celebrant",
+                "phone": "+19995550404",
+                key: {"start": "2020-03-14", "frequency": "YEARLY", "interval": 1},
+            }
+        },
+    )
+    assert lead.status_code == 201, lead.text
+
+    # A has no such field, so the same key is simply unknown there — not a
+    # window onto B's leads.
+    response = await api.get(
+        tenants.a.path("/recurring-dates/occurrences"),
+        headers=tenants.a.owner.auth,
+        params={"field_key": key, "from": "2027-01-01", "to": "2027-12-31"},
+    )
+    assert response.status_code == 404, response.text

@@ -45,7 +45,7 @@ def hasher(wired_app: FastAPI) -> PasswordHasherService:
 
 async def _workspace(db_session: AsyncSession, hasher: PasswordHasherService) -> WorkspaceFixture:
     return await build_workspace(
-        db_session, hasher, name="Routing Co", owner_email="owner@routing.test"
+        db_session, hasher, name="Routing Co", owner_email="owner@routing.example.com"
     )
 
 
@@ -59,7 +59,7 @@ async def _reps(
             hasher,
             fixture,
             key=f"rep{index}",
-            email=f"rep{index}@routing.test",
+            email=f"rep{index}@routing.example.com",
             template_name="Caller",
         )
         ids.append(actor.membership.id)
@@ -334,7 +334,7 @@ async def test_an_unlicensed_member_is_never_assigned_to(
             hasher,
             fixture,
             key="dormant",
-            email="dormant@routing.test",
+            email="dormant@routing.example.com",
             template_name="Caller",
             has_license=False,
         )

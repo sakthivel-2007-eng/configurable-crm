@@ -11,6 +11,13 @@ Tables holding customer data inherit `TenantModel`, which declares
 
 from __future__ import annotations
 
+from app.models.assignment import (
+    AssignmentCursor,
+    AssignmentRule,
+    SalesGroup,
+    SalesGroupMember,
+    ScheduledReport,
+)
 from app.models.enums import (
     ActionDirection,
     ActionFieldType,
@@ -27,13 +34,6 @@ from app.models.enums import (
     StageKind,
     SystemActionKind,
     TemplateChannel,
-)
-from app.models.assignment import (
-    AssignmentCursor,
-    AssignmentRule,
-    SalesGroup,
-    SalesGroupMember,
-    ScheduledReport,
 )
 from app.models.field import (
     ActionField,

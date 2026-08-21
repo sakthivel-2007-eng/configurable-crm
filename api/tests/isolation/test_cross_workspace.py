@@ -386,6 +386,15 @@ M8_RULE_ROUTES: list[tuple[str, str]] = [
 M8_COLLECTION_ROUTES: list[str] = [
     "/settings/sales-groups",
     "/settings/assignment-rules",
+    "/scheduled-reports",
+]
+
+# A schedule mails a rendered report to arbitrary addresses, so a leaked id is
+# an exfiltration primitive rather than merely a config leak.
+M8_SCHEDULE_ROUTES: list[tuple[str, str]] = [
+    ("PATCH", "/scheduled-reports/{report_id}"),
+    ("DELETE", "/scheduled-reports/{report_id}"),
+    ("POST", "/scheduled-reports/{report_id}/run-now"),
 ]
 
 M8_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
@@ -394,6 +403,7 @@ M8_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
     ("PATCH", "/settings/assignment-rules/reorder"),
     ("POST", "/settings/assignment-rules/preview"),
     ("POST", "/leads/distribute"),
+    ("POST", "/scheduled-reports"),
 ]
 
 _M8_BODIES: dict[str, dict[str, object]] = {
@@ -411,6 +421,13 @@ _M8_BODIES: dict[str, dict[str, object]] = {
         "lead_ids": ["00000000-0000-4000-8000-000000000001"],
         "strategy": "UNASSIGNED",
         "config": {},
+    },
+    "/scheduled-reports/{report_id}": {"name": "Renamed By An Outsider"},
+    "/scheduled-reports": {
+        "name": "Smuggled",
+        "report_type": "leads",
+        "cron": "0 9 * * *",
+        "recipients": ["outsider@example.com"],
     },
 }
 
@@ -842,6 +859,8 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(M8_RULE_ROUTES)
     declared.update(("GET", route) for route in M8_COLLECTION_ROUTES)
     declared.update(M8_COLLECTION_WRITE_ROUTES)
+    declared.update(M8_SCHEDULE_ROUTES)
+    declared.update({("GET", "/recurring-dates/occurrences")})
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

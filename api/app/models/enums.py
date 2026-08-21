@@ -14,8 +14,8 @@ import enum
 
 __all__ = [
     "ActionDirection",
-    "AssignmentStrategy",
     "ActionFieldType",
+    "AssignmentStrategy",
     "AvailabilityStatus",
     "ChangesetSource",
     "ImportJobKind",
@@ -24,8 +24,8 @@ __all__ = [
     "LeadFieldType",
     "PermissionGrant",
     "SavedFilterVisibility",
-    "StageKind",
     "ScheduledReportFormat",
+    "StageKind",
     "SystemActionKind",
     "TemplateChannel",
 ]

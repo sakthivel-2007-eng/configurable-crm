@@ -23,6 +23,14 @@ dependencies = [
     # creation reject every timezone, and the M8 scheduler unable to evaluate
     # cron in the workspace's zone.
     "tzdata>=2025.1",
+    # The scheduler's cadence is a five-field cron string evaluated in the
+    # *workspace's* timezone. Hand-rolling that matcher is a classic source of
+    # off-by-one-hour bugs around a DST boundary, which is exactly the failure
+    # a customer notices and cannot explain.
+    "croniter>=6.0.0",
+    # `arq` is the background worker in CLAUDE.md's stack table. M8 is the first
+    # milestone that needs a process rather than a function call.
+    "arq>=0.26.0",
 ]
 
 [dependency-groups]
@@ -90,7 +98,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["^alembic/versions/"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*", "openpyxl.*"]
+module = ["testcontainers.*", "openpyxl.*", "croniter.*"]
 ignore_missing_imports = true
 
 # --- pytest ----------------------------------------------------------------

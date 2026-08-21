@@ -122,6 +122,44 @@ services:
       retries: 12
       start_period: 20s
 
+  # M8's scheduler. Same image and the same environment as the API — it is the
+  # same application, run as a worker rather than a server. No ports: it talks
+  # to Postgres, Redis and SMTP, and nothing talks to it.
+  #
+  # SMTP is deliberately unset by default. With no host configured the sender
+  # records what it would have sent instead of delivering it, so a developer
+  # running the stack cannot mail a real customer from a laptop.
+  worker:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: dev
+    command: ["uv", "run", "arq", "app.workers.scheduler.WorkerSettings"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm_local_password}@postgres:5432/${POSTGRES_DB:-crm}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-crm_minio_user}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-crm_minio_password}
+      S3_BUCKET: ${S3_BUCKET:-crm-attachments}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-no-reply@example.invalid}
+    volumes:
+      - ./api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   web:
     build:
       context: ./web

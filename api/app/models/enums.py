@@ -14,6 +14,7 @@ import enum
 
 __all__ = [
     "ActionDirection",
+    "AssignmentStrategy",
     "ActionFieldType",
     "AvailabilityStatus",
     "ChangesetSource",
@@ -24,6 +25,7 @@ __all__ = [
     "PermissionGrant",
     "SavedFilterVisibility",
     "StageKind",
+    "ScheduledReportFormat",
     "SystemActionKind",
     "TemplateChannel",
 ]
@@ -224,3 +226,33 @@ class ImportJobStatus(enum.StrEnum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+class AssignmentStrategy(enum.StrEnum):
+    """How a matched rule picks the member (docs/01-data-model.md §5.3).
+
+    Six ways of answering one question. They are product concepts — *how* to
+    choose — never *who*: the members, groups and field values a strategy
+    reads are all rows.
+    """
+
+    #: Next member in the list, by cursor. The cursor is per rule.
+    ROUND_ROBIN = "ROUND_ROBIN"
+    #: Round-robin, but a member with weight 3 is dealt three times per cycle.
+    WEIGHTED = "WEIGHTED"
+    #: Look up `config.map[<the lead's value for config.field_key>]`.
+    FIELD_VALUE = "FIELD_VALUE"
+    #: Round-robin within `config.group_id`, honouring per-member weights.
+    SALES_GROUP = "SALES_GROUP"
+    #: Always `config.membership_id`. Useful as a catch-all last rule.
+    FIXED = "FIXED"
+    #: Match, and deliberately leave the lead unassigned. Lets an admin stop
+    #: rule evaluation for a segment without deleting the rules below it.
+    UNASSIGNED = "UNASSIGNED"
+
+
+class ScheduledReportFormat(enum.StrEnum):
+    """Attachment format for a scheduled report (§5.5)."""
+
+    CSV = "CSV"
+    XLSX = "XLSX"

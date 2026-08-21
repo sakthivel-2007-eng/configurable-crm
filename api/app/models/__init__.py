@@ -14,6 +14,7 @@ from __future__ import annotations
 from app.models.enums import (
     ActionDirection,
     ActionFieldType,
+    AssignmentStrategy,
     AvailabilityStatus,
     ChangesetSource,
     ImportJobKind,
@@ -22,9 +23,17 @@ from app.models.enums import (
     LeadFieldType,
     PermissionGrant,
     SavedFilterVisibility,
+    ScheduledReportFormat,
     StageKind,
     SystemActionKind,
     TemplateChannel,
+)
+from app.models.assignment import (
+    AssignmentCursor,
+    AssignmentRule,
+    SalesGroup,
+    SalesGroupMember,
+    ScheduledReport,
 )
 from app.models.field import (
     ActionField,
@@ -61,6 +70,9 @@ __all__ = [
     "ActionField",
     "ActionFieldOption",
     "ActionFieldType",
+    "AssignmentCursor",
+    "AssignmentRule",
+    "AssignmentStrategy",
     "AvailabilityLog",
     "AvailabilityStatus",
     "Base",
@@ -85,8 +97,12 @@ __all__ = [
     "PermissionGrant",
     "PermissionTemplate",
     "RefreshToken",
+    "SalesGroup",
+    "SalesGroupMember",
     "SavedFilter",
     "SavedFilterVisibility",
+    "ScheduledReport",
+    "ScheduledReportFormat",
     "Stage",
     "StageKind",
     "SystemActionKind",

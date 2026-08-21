@@ -74,6 +74,9 @@ class TeamAccess(_Group):
     manage_licenses: bool = False
     manage_availability: bool = False
     manage_hierarchy: bool = False
+    #: M8. Groups are a distribution target and an M9 report segment, so
+    #: they sit with the team rather than with the rules that read them.
+    manage_sales_groups: bool = False
 
 
 class PermissionsAccess(_Group):
@@ -112,6 +115,12 @@ class AutomationsAccess(_Group):
     """PROPOSED — v1 ships webhooks; the workflow engine is v2."""
 
     view_automations: bool = False
+    #: M8. Editing a rule redirects where every future lead lands, so it is
+    #: separate from merely viewing the automation list.
+    manage_assignment_rules: bool = False
+    #: M8. Redistributing existing leads takes work off one rep and gives it
+    #: to another. Distinct from creating the rule that would have done it.
+    distribute_leads: bool = False
     manage_webhooks: bool = False
     manage_api_keys: bool = False
     view_intake_log: bool = False

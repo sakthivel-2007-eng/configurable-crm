@@ -80,12 +80,26 @@ _ROOT_CAPS: dict[str, Any] = {
         "merge_leads": True,
         "search": True,
     },
-    "permissions": {"admin_access": True},
-    "team": {"admin_access": True},
     # `admin_access` grants everything in a group *including capabilities added
     # later* — but only for groups the template names at all. M7 shipped task
-    # endpoints that Root could not use until this line existed.
+    # endpoints Root could not use until `tasks` appeared here, and M8 found
+    # `automations`, `reports`, `calling`, `salesform`, `billings` and
+    # `integrations` all still missing, with M8/M9/M10 endpoints queued behind
+    # them. Root is `is_readonly`, so an admin cannot repair the omission from
+    # the UI — a missing group is an unfixable dead feature.
+    #
+    # So Root names **every** access group. It is the workspace superuser; there
+    # is no capability it should lack, and enumerating them here means no future
+    # milestone has to remember this again.
+    "permissions": {"admin_access": True},
+    "team": {"admin_access": True},
     "tasks": {"admin_access": True},
+    "reports": {"admin_access": True},
+    "automations": {"admin_access": True},
+    "calling": {"admin_access": True},
+    "salesform": {"admin_access": True},
+    "billings": {"admin_access": True},
+    "integrations": {"admin_access": True},
 }
 _ADMIN_CAPS: dict[str, Any] = {
     "leads": {
@@ -101,6 +115,14 @@ _ADMIN_CAPS: dict[str, Any] = {
     "permissions": {"admin_access": True},
     "team": {"admin_access": True},
     "tasks": {"admin_access": True},
+    "reports": {"admin_access": True},
+    "automations": {"admin_access": True},
+    "calling": {"admin_access": True},
+    "salesform": {"admin_access": True},
+    "integrations": {"admin_access": True},
+    # Deliberately not `billings`. Admin is an editable template, so a workspace
+    # that wants its admins in the billing screens can grant it; Root always has
+    # it. Spending money is the one thing worth making someone opt into.
 }
 _MANAGER_CAPS: dict[str, Any] = {
     "leads": {

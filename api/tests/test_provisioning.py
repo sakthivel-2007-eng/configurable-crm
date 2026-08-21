@@ -255,3 +255,43 @@ def test_slugify_handles_accents_and_punctuation() -> None:
 async def test_creating_a_workspace_requires_authentication(api: AsyncClient) -> None:
     response = await api.post("/api/v1/workspaces", json={"name": "Anonymous"})
     assert response.status_code == 401
+
+
+def test_root_names_every_access_group() -> None:
+    """Root must name all 10 Access groups — a missing one is unfixable.
+
+    `admin_access` grants everything in a group *including capabilities added
+    later*, but only for groups the template names at all. Root is
+    `is_readonly`, so if it omits a group, no admin can grant it from the UI and
+    the endpoints behind it are dead in every workspace ever created.
+
+    That is not hypothetical. M7 shipped task endpoints Root could not call, and
+    when M8 looked, `automations`, `reports`, `calling`, `salesform`, `billings`
+    and `integrations` were all still missing with M8, M9 and M10 endpoints
+    queued behind them.
+
+    This test is the fix. The defaults dict is easy to forget; a red test is not.
+    """
+    from app.permissions import ACCESS_GROUPS
+    from app.services.provisioning import _ROOT_CAPS
+
+    assert set(_ROOT_CAPS) == set(ACCESS_GROUPS), (
+        "Root is missing access groups: "
+        f"{sorted(set(ACCESS_GROUPS) - set(_ROOT_CAPS))}. Every endpoint gated "
+        "on one of these would 403 for Root, in every workspace, unfixably."
+    )
+    for group, flags in _ROOT_CAPS.items():
+        assert flags.get("admin_access") is True, f"Root must hold admin_access on {group}"
+
+
+def test_admin_names_every_access_group_except_billing() -> None:
+    """Admin is the same rule, with one deliberate exception.
+
+    Admin is an editable template, so a workspace that wants its admins in the
+    billing screens grants it there. Root always holds billing. Spending money
+    is the one capability worth making somebody opt into.
+    """
+    from app.permissions import ACCESS_GROUPS
+    from app.services.provisioning import _ADMIN_CAPS
+
+    assert set(_ADMIN_CAPS) == set(ACCESS_GROUPS) - {"billings"}

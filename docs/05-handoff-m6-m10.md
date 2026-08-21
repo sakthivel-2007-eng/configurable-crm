@@ -374,6 +374,47 @@ was edited in between.
 
 ## 5. M8 — Assignment engine, sales groups, scheduler *(6–8 days)*
 
+> **Update, 21 Aug 2026 — M8 has landed.** `8bd790e` (engine), `6ce7cdf`
+> (groups, rules, distribution), `ef9ac65` (scheduler), `799a258` (frontend).
+> Revision `0008_m8_assignment`. 588 backend tests, 100 Playwright.
+>
+> Acceptance verified live against the 50k Northwind Tutors workspace: with one
+> rep marked On Leave, four consecutive leads all routed past them; with the rep
+> back at WORKING the cursor alternated correctly; a scheduled report rendered
+> and sent with no error. The intake-API half of the stated criterion is M10 —
+> the rule runs in `create_lead`, which intake will call, so nothing further is
+> needed there.
+>
+> Six things this milestone settled that the section below does not say:
+>
+> - **The concurrency test took three attempts to become real.** Racing two
+>   asyncio tasks proves nothing — they ping-pong at await points and serialise
+>   by accident. And with no cursor row yet, the `ON CONFLICT DO NOTHING` insert
+>   takes its own lock and serialises them anyway. Both versions passed against
+>   a deliberately broken engine. What works: seed the cursor, then assert the
+>   property directly — a second transaction *blocks*, and on release picks the
+>   next rep. **The safety is the locked upsert and `FOR UPDATE` together**, not
+>   either alone.
+> - **Rules compile with system grants, not the caller's.** Otherwise a rule on
+>   a field the lead's creator cannot View silently stops matching, and identical
+>   leads route differently depending on who typed them in.
+> - **Unlicensed members are skipped unconditionally**, whatever
+>   `skip_unavailable` says. A lead assigned to somebody who cannot log in looks
+>   assigned on every report and is never called.
+> - **Root and Admin named 4 of the 10 capability groups.** The M7 `tasks` trap,
+>   still loaded for `automations` (M8, M10), `reports` (M9) and `integrations`
+>   (M10). Root is `is_readonly`, so it was unfixable from the UI. Root now names
+>   all ten, Admin all but `billings`, and two tests assert the coverage against
+>   `ACCESS_GROUPS` so no future milestone can reintroduce it.
+> - **`arq` is now a real process**, not a function call — `docker compose` gains
+>   a `worker` service. M9 and M10 extend `app/workers/scheduler.py` rather than
+>   adding another.
+> - **The schedulable report catalogue is `leads` only.** M9 owns the rest and
+>   extends `REPORT_TYPES`; the write path refuses an unknown type by name,
+>   because a schedule for a report that does not exist is a row that fails every
+>   morning.
+
+
 `04-feature-coverage.md`: *"A telecalling CRM without automatic distribution is a
 spreadsheet."* This is a subsystem, not a screen.
 
@@ -556,7 +597,7 @@ These are the ones that have actually caused rework here.
     demo seed (§8)         done  231d845
 M6  list + filters         done  3c6b2b4 · 231d845 · c7db934
 M7  tasks, bulk, undo      done  26b0e20 · 3b055ba · 9339ffa · 2958832
-M8  assignment, scheduler  6-8d
+M8  assignment, scheduler  done  8bd790e · 6ce7cdf · ef9ac65 · 799a258
 M9  dashboards, reports    6-8d
 M10 intake, outbox         5-7d
 ```

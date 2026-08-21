@@ -287,12 +287,20 @@ async def run_dispatch(
             totals["failed"] += 1
             continue
 
+        # Read the outcome *before* committing. After a commit the ORM expires
+        # the instance, so touching `row.status` would trigger a lazy refresh —
+        # which raises `MissingGreenlet` unless the caller happened to build
+        # their sessionmaker with `expire_on_commit=False`. Every factory in
+        # this codebase does, which is exactly why this went unnoticed until a
+        # throwaway script used a plain one and crashed on the first retry.
+        outcome = row.status
+
         # Commit per row. A crash mid-batch keeps every delivery already
         # recorded, rather than replaying the whole batch.
         await raw.commit()
         if result.ok:
             totals["delivered"] += 1
-        elif row.status is OutboxStatus.DEAD:
+        elif outcome is OutboxStatus.DEAD:
             totals["dead"] += 1
         else:
             totals["failed"] += 1

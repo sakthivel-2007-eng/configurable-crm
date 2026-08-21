@@ -441,3 +441,33 @@ def test_the_event_catalogue_matches_the_contract() -> None:
         "task.created",
         "task.completed",
     } == EVENT_NAMES
+
+
+async def test_dispatch_survives_a_session_that_expires_on_commit(
+    postgres_async_dsn: str, db_session: AsyncSession, hasher: PasswordHasherService
+) -> None:
+    """`run_dispatch` must not depend on the caller's sessionmaker settings.
+
+    Every factory in this codebase sets `expire_on_commit=False`, which hid a
+    real defect: the loop read `row.status` *after* committing, so the ORM
+    expired the instance and the attribute access tried to lazy-load outside a
+    greenlet. A throwaway script using a plain `async_sessionmaker` crashed on
+    the first retry — and so would any second worker somebody writes.
+
+    So this test deliberately builds the session the way somebody *not* reading
+    `db.py` would.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    fixture, endpoint = await _setup(db_session, hasher, name="Expiring")
+    now = dt.datetime.now(dt.UTC)
+    await _queue(db_session, fixture, endpoint, next_attempt_at=now)
+
+    engine = create_async_engine(postgres_async_dsn)
+    try:
+        plain = async_sessionmaker(engine)  # expire_on_commit defaults to True
+        async with plain() as raw:
+            result = await run_dispatch(raw, transport=RecordingTransport(status_code=500), now=now)
+        assert result["failed"] == 1
+    finally:
+        await engine.dispose()

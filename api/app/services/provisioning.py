@@ -82,6 +82,10 @@ _ROOT_CAPS: dict[str, Any] = {
     },
     "permissions": {"admin_access": True},
     "team": {"admin_access": True},
+    # `admin_access` grants everything in a group *including capabilities added
+    # later* — but only for groups the template names at all. M7 shipped task
+    # endpoints that Root could not use until this line existed.
+    "tasks": {"admin_access": True},
 }
 _ADMIN_CAPS: dict[str, Any] = {
     "leads": {
@@ -96,6 +100,7 @@ _ADMIN_CAPS: dict[str, Any] = {
     },
     "permissions": {"admin_access": True},
     "team": {"admin_access": True},
+    "tasks": {"admin_access": True},
 }
 _MANAGER_CAPS: dict[str, Any] = {
     "leads": {

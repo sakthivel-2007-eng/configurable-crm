@@ -46,6 +46,7 @@ EXPECTED_REVISIONS = [
     "0004_m4_permissions",
     "0005_m5_leads",
     "0006_m6_filters",
+    "0007_m7_work",
 ]
 
 
@@ -130,6 +131,11 @@ async def test_no_enum_in_the_database_encodes_business_taxonomy(
         # sharing model, not a customer vocabulary: no workspace names
         # these, they only choose among them.
         "saved_filter_visibility",
+        # M7 — what a spreadsheet run is doing and where it has got to.
+        # Both describe the product's own import machinery; neither names
+        # anything a customer would recognise as their vocabulary.
+        "import_job_kind",
+        "import_job_status",
     }
 
     # And the harder check: no enum *value* anywhere names a business concept.

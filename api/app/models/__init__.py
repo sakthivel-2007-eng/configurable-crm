@@ -16,6 +16,8 @@ from app.models.enums import (
     ActionFieldType,
     AvailabilityStatus,
     ChangesetSource,
+    ImportJobKind,
+    ImportJobStatus,
     IndexedFieldStatus,
     LeadFieldType,
     PermissionGrant,
@@ -44,6 +46,7 @@ from app.models.permission import TemplateFieldGrant, TemplateLeadView
 from app.models.pipeline import CallDisposition, LostReason, Stage
 from app.models.user import RefreshToken, User
 from app.models.view import SavedFilter, TableLayout
+from app.models.work import ImportJob, Label, LeadLabel, Task
 from app.models.workspace import (
     AvailabilityLog,
     Membership,
@@ -66,11 +69,16 @@ __all__ = [
     "ChangesetSource",
     "CustomActionType",
     "FieldOption",
+    "ImportJob",
+    "ImportJobKind",
+    "ImportJobStatus",
     "IndexedField",
     "IndexedFieldStatus",
+    "Label",
     "Lead",
     "LeadField",
     "LeadFieldType",
+    "LeadLabel",
     "LostReason",
     "Membership",
     "MessageTemplate",
@@ -83,6 +91,7 @@ __all__ = [
     "StageKind",
     "SystemActionKind",
     "TableLayout",
+    "Task",
     "TemplateChannel",
     "TemplateFieldGrant",
     "TemplateLeadView",

@@ -92,11 +92,21 @@ M6_TABLES = {
     "table_layouts",
 }
 
+# M7 owns the rest of §6's list plus the job table every import and export
+# answers with. `outbox_events`, `webhook_endpoints`, `api_keys` and
+# `intake_log` share that section but belong to M10.
+M7_TABLES = {
+    "tasks",
+    "labels",
+    "lead_labels",
+    "import_jobs",
+}
+
 
 def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
     """No table exists before the milestone that owns it."""
     assert set(Base.metadata.tables) == (
-        M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES
+        M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES | M7_TABLES
     )
 
 

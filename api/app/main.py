@@ -26,6 +26,7 @@ from app.routers import members as members_router
 from app.routers import permission_templates as permission_templates_router
 from app.routers import pipeline as pipeline_router
 from app.routers import views as views_router
+from app.routers import work as work_router
 from app.routers import workspaces as workspaces_router
 from app.services.health import HealthService
 from app.services.lead_ownership import DatabaseLeadOwnership, set_lead_ownership
@@ -117,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pipeline_router.custom_actions_router, prefix=tenant_prefix)
     app.include_router(leads_router.router, prefix=tenant_prefix)
     app.include_router(views_router.router, prefix=tenant_prefix)
+    app.include_router(work_router.router, prefix=tenant_prefix)
 
     return app
 

@@ -278,6 +278,116 @@ _BODIES: dict[str, dict[str, object]] = {
 }
 
 
+# --- M6: saved filters, layouts, filtered search ------------------------------
+
+M6_COLLECTION_ROUTES: list[str] = ["/filters", "/layouts"]
+
+M6_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/filters"),
+    ("PATCH", "/filters/reorder"),
+    ("PUT", "/layouts"),
+    ("POST", "/leads/search"),
+]
+
+M6_FILTER_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/filters/{filter_id}"),
+    ("PATCH", "/filters/{filter_id}"),
+    ("DELETE", "/filters/{filter_id}"),
+    ("POST", "/filters/{filter_id}/duplicate"),
+    ("GET", "/filters/{filter_id}/stats"),
+]
+
+_M6_BODIES: dict[str, dict[str, object]] = {
+    "/filters/{filter_id}": {"name": "Renamed By An Outsider"},
+    "/filters": {
+        "name": "Smuggled",
+        "definition": {"type": "group", "op": "AND", "children": []},
+    },
+    "/filters/reorder": {"filter_ids": []},
+    "/layouts": {"columns": ["identity_value"]},
+    "/leads/search": {"filter": {"type": "group", "op": "AND", "children": []}},
+}
+
+
+# --- M7: bulk edit and undo ---------------------------------------------------
+
+M7_CHANGESET_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/changesets/{changeset_id}"),
+    ("POST", "/changesets/{changeset_id}/preview-undo"),
+    ("POST", "/changesets/{changeset_id}/undo"),
+]
+
+M7_COLLECTION_WRITE_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/leads/bulk"),
+    ("POST", "/leads/export"),
+    ("POST", "/leads/merge"),
+]
+
+#: An export job holds a file of one workspace's customer data. Reaching one
+#: across the boundary would download it.
+M7_EXPORT_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/leads/export/{job_id}"),
+]
+
+M7_TASK_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/tasks/{task_id}"),
+    ("PATCH", "/tasks/{task_id}"),
+    ("POST", "/tasks/{task_id}/complete"),
+    ("POST", "/tasks/{task_id}/reopen"),
+]
+
+M7_LABEL_ROUTES: list[tuple[str, str]] = [
+    ("PATCH", "/labels/{label_id}"),
+    ("DELETE", "/labels/{label_id}"),
+]
+
+M7_JOB_ROUTES: list[tuple[str, str]] = [
+    ("GET", "/imports/{job_id}"),
+    ("PUT", "/imports/{job_id}/mapping"),
+    ("POST", "/imports/{job_id}/preview"),
+    ("POST", "/imports/{job_id}/commit"),
+]
+
+#: Routes taking both a lead id and a label id — the two-id shape that a naive
+#: scoping check passes and a real one has to resolve twice.
+M7_LEAD_LABEL_ROUTES: list[tuple[str, str]] = [
+    ("POST", "/leads/{lead_id}/labels/{label_id}"),
+    ("DELETE", "/leads/{lead_id}/labels/{label_id}"),
+]
+
+M7_LEAD_CHILD_ROUTES: list[str] = [
+    "/leads/{lead_id}/tasks",
+    "/leads/{lead_id}/labels",
+]
+
+M7_COLLECTION_ROUTES: list[str] = [
+    "/tasks",
+    "/labels",
+    "/imports",
+    "/imports/fields",
+    "/tasks/counts",
+]
+
+_M7_BODIES: dict[str, dict[str, object]] = {
+    "/changesets/{changeset_id}/undo": {"skip_conflicts": True},
+    "/changesets/{changeset_id}/preview-undo": {},
+    "/leads/bulk": {
+        "lead_ids": ["00000000-0000-4000-8000-000000000001"],
+        "values": {"name": "Smuggled"},
+    },
+    "/tasks/{task_id}": {"title": "Renamed By An Outsider"},
+    "/tasks": {"title": "Smuggled", "due_at": "2026-09-01T09:00:00Z"},
+    "/labels/{label_id}": {"name": "Renamed By An Outsider"},
+    "/labels": {"name": "Smuggled"},
+    "/imports/{job_id}/mapping": {"mapping": {"Phone": "phone"}},
+    "/leads/export": {},
+    "/leads/merge": {
+        "primary_id": "00000000-0000-4000-8000-000000000001",
+        "merge_ids": ["00000000-0000-4000-8000-000000000002"],
+    },
+}
+
+
 # --- 1. by direct id ---------------------------------------------------------
 
 
@@ -668,6 +778,20 @@ def test_the_matrix_covers_every_workspace_scoped_route(app: FastAPI) -> None:
     declared.update(("GET", route) for route in M5_COLLECTION_ROUTES)
     declared.update(M5_COLLECTION_WRITE_ROUTES)
     declared.update(M5_TEMPLATE_ROUTES)
+    declared.update(M6_FILTER_ROUTES)
+    declared.update(("GET", route) for route in M6_COLLECTION_ROUTES)
+    declared.update(M6_COLLECTION_WRITE_ROUTES)
+    declared.update(M7_CHANGESET_ROUTES)
+    declared.update(M7_COLLECTION_WRITE_ROUTES)
+    declared.update(M7_TASK_ROUTES)
+    declared.update(M7_LABEL_ROUTES)
+    declared.update(M7_JOB_ROUTES)
+    declared.update(M7_EXPORT_ROUTES)
+    declared.update({("GET", "/leads/duplicates")})
+    declared.update(M7_LEAD_LABEL_ROUTES)
+    declared.update(("GET", route) for route in M7_LEAD_CHILD_ROUTES)
+    declared.update(("GET", route) for route in M7_COLLECTION_ROUTES)
+    declared.update({("POST", "/tasks"), ("POST", "/labels"), ("POST", "/imports")})
 
     mounted: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():

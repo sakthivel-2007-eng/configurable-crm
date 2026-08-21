@@ -32,6 +32,27 @@ config.set_main_option("sqlalchemy.url", settings.database_url)
 target_metadata = Base.metadata
 
 
+def include_object(
+    obj: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    """Hide the indexed-field worker's indexes from autogenerate.
+
+    `app.workers.indexing` builds `ix_lv_<sha1>` expression indexes at runtime —
+    the one sanctioned piece of runtime DDL (architecture rule 7). No migration
+    describes them and none should: they come and go as workspaces declare and
+    withdraw indexed fields.
+
+    Without this filter, autogenerate sees them in the database, finds nothing
+    matching in the metadata, and helpfully writes `op.drop_index(...)` into the
+    next revision — which would delete a live customer's index on deploy.
+    """
+    return not (type_ == "index" and name is not None and name.startswith("ix_lv_"))
+
+
 def run_migrations_offline() -> None:
     """Emit SQL to stdout without a DBAPI connection."""
     context.configure(
@@ -41,6 +62,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -52,6 +74,7 @@ def do_run_migrations(connection: Connection) -> None:
         target_metadata=target_metadata,
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

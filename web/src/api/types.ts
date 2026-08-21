@@ -435,6 +435,10 @@ export interface Changeset {
   readonly summary: string
   readonly lead_count: number
   readonly is_undone: boolean
+  readonly undone_at?: string | null
+  readonly undone_by_id?: string | null
+  /** Set when this changeset *is* an undo, naming what it reversed. */
+  readonly undo_of_id?: string | null
   readonly created_at: string
 }
 
@@ -458,4 +462,242 @@ export interface RenderedTemplate {
   readonly body: string
   /** Placeholders that resolved to nothing — including fields the sender cannot view. */
   readonly unresolved: readonly string[]
+}
+
+// --- the filter DSL (M6) -----------------------------------------------------
+//
+// The mirror of `app/filters/dsl.py`. Two families of node in one union: field
+// rules ask about a lead's current state, history predicates ask about its
+// timeline. The builder renders both as first-class rules — a user never sees
+// or edits the JSON these describe.
+
+/** A window, relative or absolute. Exactly one form, matching the server. */
+export interface FilterWindow {
+  readonly last_days?: number
+  readonly from?: string
+  readonly to?: string
+}
+
+export interface FieldRuleNode {
+  readonly type: 'field'
+  readonly key: string
+  readonly op: string
+  readonly value?: unknown
+}
+
+export interface ActionPerformedNode {
+  readonly type: 'action_performed'
+  readonly action_kind?: ActionKind | null
+  readonly action_type_id?: string | null
+  readonly actor_id?: string | null
+  readonly payload_match?: Record<string, unknown>
+  readonly min_count?: number
+  readonly within?: FilterWindow | null
+}
+
+export interface ActionNotPerformedNode {
+  readonly type: 'action_not_performed'
+  readonly action_kind?: ActionKind | null
+  readonly action_type_id?: string | null
+  readonly actor_id?: string | null
+  readonly payload_match?: Record<string, unknown>
+  readonly within?: FilterWindow | null
+}
+
+export interface StatusChangedNode {
+  readonly type: 'status_changed'
+  readonly from_stage_id?: string | null
+  readonly to_stage_id?: string | null
+  readonly within?: FilterWindow | null
+}
+
+export interface AssigneeChangedNode {
+  readonly type: 'assignee_changed'
+  readonly from_membership_id?: string | null
+  readonly to_membership_id?: string | null
+  readonly within?: FilterWindow | null
+}
+
+export interface GroupNode {
+  readonly type: 'group'
+  readonly op: 'AND' | 'OR'
+  readonly children: readonly FilterNode[]
+}
+
+export type HistoryNode =
+  ActionPerformedNode | ActionNotPerformedNode | StatusChangedNode | AssigneeChangedNode
+
+export type FilterNode = GroupNode | FieldRuleNode | HistoryNode
+
+export type SavedFilterVisibility = 'PERSONAL' | 'SHARED' | 'ROLE'
+
+export interface SavedFilter {
+  readonly id: string
+  readonly name: string
+  readonly description: string | null
+  readonly definition: FilterNode
+  readonly visibility: SavedFilterVisibility
+  readonly template_id: string | null
+  readonly owner_membership_id: string | null
+  readonly sort_order: number
+  readonly is_archived: boolean
+  readonly created_at: string
+}
+
+export interface FilterStats {
+  readonly filter_id: string
+  readonly total: number
+  readonly by_stage: Record<string, number>
+}
+
+export interface TableLayout {
+  readonly id: string
+  readonly filter_id: string | null
+  readonly columns: readonly string[]
+  readonly column_widths: Record<string, number>
+  readonly sort_key: string | null
+  readonly sort_desc: boolean
+}
+
+export interface LeadSearchRequest {
+  readonly filter?: FilterNode | null
+  readonly q?: string | null
+  readonly sort?: string
+  readonly limit?: number
+  readonly offset?: number
+  readonly columns?: readonly string[] | null
+  /**
+   * Quick filters. Separate from `filter` because these are columns on
+   * `leads` — a DSL field rule references a workspace-defined field key by
+   * definition, so stage and assignee are out of its reach.
+   */
+  readonly stage_id?: string | null
+  readonly assignee_id?: string | null
+  readonly unassigned?: boolean
+  readonly rating?: number | null
+  readonly stage_kinds?: readonly StageKind[]
+}
+
+// --- tasks, labels, undo and imports (M7) ------------------------------------
+
+/** `upcoming` and `late` are computed against the *workspace's* timezone. */
+export type TaskBucket = 'upcoming' | 'late' | 'done'
+
+export interface Task {
+  readonly id: string
+  readonly lead_id: string | null
+  readonly title: string
+  readonly notes: string | null
+  readonly due_at: string
+  readonly assignee_id: string | null
+  readonly completed_at: string | null
+  readonly completed_by_id: string | null
+  readonly created_at: string
+}
+
+export interface TaskCounts {
+  readonly upcoming: number
+  readonly late: number
+  readonly done: number
+}
+
+export interface Label {
+  readonly id: string
+  readonly name: string
+  readonly color: string | null
+  readonly sort_order: number
+  readonly is_archived: boolean
+}
+
+/**
+ * One value an undo would put back, and whether it still can.
+ *
+ * `expected` is what the changeset set; `current` is what the lead holds now.
+ * When they differ somebody has edited since, and reverting would discard
+ * their work — which is what `conflicted` means.
+ */
+export interface Reversal {
+  readonly target: string
+  readonly label: string
+  readonly revert_to: unknown
+  readonly expected: unknown
+  readonly current: unknown
+  readonly conflicted: boolean
+}
+
+export type UndoOutcome = 'REVERSIBLE' | 'CONFLICTED' | 'ALREADY_UNDONE' | 'DELETED'
+
+export interface LeadUndoPlan {
+  readonly lead_id: string
+  readonly identity_value: string
+  readonly outcome: UndoOutcome
+  readonly reversals: readonly Reversal[]
+}
+
+export interface UndoPreview {
+  readonly changeset_id: string
+  readonly summary: string
+  readonly is_undone: boolean
+  readonly counts: {
+    readonly total: number
+    readonly reversible: number
+    readonly conflicted: number
+    readonly deleted: number
+  }
+  readonly leads: readonly LeadUndoPlan[]
+}
+
+export interface UndoResult {
+  readonly undo_changeset_id: string
+  readonly undone_changeset_id: string
+  readonly leads_reverted: number
+  readonly leads_skipped: number
+  readonly skipped: readonly LeadUndoPlan[]
+}
+
+export type ImportJobKind = 'LEAD_IMPORT' | 'LEAD_UPDATE' | 'ACTION_IMPORT' | 'EXPORT'
+
+export type ImportJobStatus =
+  'UPLOADED' | 'MAPPED' | 'PREVIEWED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+
+/** What a dry run found, and later what the commit did. */
+export interface ImportResult {
+  readonly counts?: Record<string, number>
+  readonly total?: number
+  readonly errors?: ReadonlyArray<{
+    readonly row_number: number
+    readonly status: string
+    readonly identity: string | null
+    readonly message: string | null
+  }>
+  readonly errors_truncated?: boolean
+  readonly columns?: readonly string[]
+}
+
+export interface ImportJob {
+  readonly id: string
+  readonly kind: ImportJobKind
+  readonly status: ImportJobStatus
+  readonly filename: string
+  readonly source_columns: readonly string[]
+  readonly mapping: Record<string, string>
+  readonly options: Record<string, unknown>
+  readonly result: ImportResult
+  readonly row_count: number
+  readonly changeset_id: string | null
+  readonly error: string | null
+  readonly created_at: string
+}
+
+/** A field the caller may map a column onto. */
+export interface ImportableField {
+  readonly key: string
+  readonly label: string
+  readonly field_type: string
+}
+
+export interface DuplicateGroup {
+  readonly value: string
+  readonly lead_ids: readonly string[]
+  readonly identity_values: readonly string[]
 }

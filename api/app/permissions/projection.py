@@ -210,6 +210,15 @@ class FieldWriteFilter:
                 fields=refused,
             )
 
+    def can_import(self, key: str) -> bool:
+        """The Import grant as a question rather than an assertion.
+
+        `check_import` refuses a mapping the caller submitted; this decides
+        what to *offer* them in the first place, so the mapping UI never shows
+        a field the API would then reject.
+        """
+        return self._grants.can_import(key)
+
     def check_import(self, keys: Sequence[str], *, known_keys: frozenset[str]) -> None:
         """The Import grant, which is independent of Edit.
 

@@ -27,12 +27,20 @@ import logging
 import re
 import uuid
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import text, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.models.enums import IndexedFieldStatus
+from app.models.field import IndexedField
 
-__all__ = ["MAX_INDEXED_FIELDS", "build_index", "drop_index", "index_name"]
+__all__ = [
+    "MAX_INDEXED_FIELDS",
+    "build_index",
+    "drop_index",
+    "index_name",
+    "remove_declared_index",
+    "run_declared_index_build",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +60,15 @@ _SAFE_NAME = re.compile(r"^ix_lv_[0-9a-f]{40}$")
 #: does not, something has written a key we did not generate and the build must
 #: refuse rather than interpolate it.
 _SAFE_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
+
+#: `CREATE INDEX CONCURRENTLY` waits for every transaction older than itself to
+#: finish before it can start, and for a second wave before it can complete.
+#: One client sitting `idle in transaction` therefore stalls the build
+#: indefinitely — and an unbounded build pins a pool connection while leaving
+#: `status` at PENDING, which is precisely the stuck state this worker exists to
+#: get out of. Bounded, so a blocked build reports FAILED and an admin can see
+#: why and retry.
+_BUILD_LOCK_TIMEOUT = "5min"
 
 
 class UnsafeIdentifierError(RuntimeError):
@@ -98,6 +115,30 @@ def _build_statement(name: str, key: str) -> str:
     )
 
 
+async def _drop_by_name(engine: AsyncEngine, name: str) -> None:
+    """`DROP INDEX CONCURRENTLY`, on its own AUTOCOMMIT connection."""
+    async with engine.connect() as connection:
+        await connection.execution_options(isolation_level="AUTOCOMMIT")
+        await connection.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+
+
+async def _drop_leftover(engine: AsyncEngine, name: str) -> None:
+    """Clear the INVALID index a failed build leaves behind.
+
+    Best effort, and deliberately swallowing: the caller is already reporting a
+    failure, and raising here would replace the real reason the build failed
+    with the less useful reason the cleanup did.
+    """
+    try:
+        await _drop_by_name(engine, name)
+    except Exception as exc:
+        logger.warning(
+            "indexed_field.leftover_drop_failed",
+            extra={"index": name},
+            exc_info=exc,
+        )
+
+
 async def build_index(
     engine: AsyncEngine,
     *,
@@ -121,6 +162,7 @@ async def build_index(
     try:
         async with engine.connect() as connection:
             await connection.execution_options(isolation_level="AUTOCOMMIT")
+            await connection.execute(text(f"SET lock_timeout = '{_BUILD_LOCK_TIMEOUT}'"))
             await connection.execute(text(statement))
     except Exception as exc:
         logger.warning(
@@ -128,6 +170,11 @@ async def build_index(
             extra={"workspace_id": str(workspace_id), "field_id": str(field_id)},
             exc_info=exc,
         )
+        # A failed `CREATE INDEX CONCURRENTLY` leaves the index behind marked
+        # INVALID. Left there it would poison every retry: the statement says
+        # `IF NOT EXISTS`, so the next attempt would find the broken index,
+        # skip creation and report success over an index Postgres will not use.
+        await _drop_leftover(engine, name)
         return IndexedFieldStatus.FAILED, str(exc)[:500]
 
     logger.info(
@@ -148,7 +195,89 @@ async def drop_index(
     `CONCURRENTLY` again, and `IF EXISTS` so un-declaring a field whose build
     failed is not itself an error.
     """
-    name = index_name(workspace_id, field_id)
-    async with engine.connect() as connection:
-        await connection.execution_options(isolation_level="AUTOCOMMIT")
-        await connection.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+    await _drop_by_name(engine, index_name(workspace_id, field_id))
+
+
+# --- invocation --------------------------------------------------------------
+#
+# The two entry points above build and drop indexes but record nothing. These
+# two are what a caller actually schedules: they run the DDL and then settle the
+# `indexed_fields` row, so `status` reaches READY or FAILED rather than sitting
+# at PENDING forever.
+#
+# They take a session factory rather than a session because they outlive the
+# request that scheduled them — the request's session is closed by the time
+# these run. For the same reason every statement here names `workspace_id`
+# explicitly: there is no `ScopedSession` out here to do it, and rule 1 does not
+# stop applying just because the caller is a background task.
+
+
+async def run_declared_index_build(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: uuid.UUID,
+    field_id: uuid.UUID,
+    field_key: str,
+) -> IndexedFieldStatus:
+    """Build the index for a declaration, then record how it went.
+
+    Returns the status written, which is what the tests assert on — a caller
+    scheduling this as fire-and-forget ignores it.
+    """
+    status, error = await build_index(
+        engine,
+        workspace_id=workspace_id,
+        field_id=field_id,
+        field_key=field_key,
+    )
+
+    async with session_factory() as session:
+        # RETURNING rather than `rowcount`: it says whether the declaration was
+        # still there to settle, which is the question the next branch asks.
+        result = await session.execute(
+            update(IndexedField)
+            .where(
+                IndexedField.workspace_id == workspace_id,
+                IndexedField.field_id == field_id,
+            )
+            .values(status=status.value, last_error=error)
+            .returning(IndexedField.id)
+        )
+        settled = result.scalar_one_or_none()
+        await session.commit()
+
+    if settled is None and status is IndexedFieldStatus.READY:
+        # The declaration was withdrawn while the index was building, so the
+        # DROP ran against an index that did not exist yet and did nothing.
+        # Without this the workspace is left with an index no row describes,
+        # which nothing would ever clean up.
+        logger.info(
+            "indexed_field.built_after_undeclare",
+            extra={"workspace_id": str(workspace_id), "field_id": str(field_id)},
+        )
+        await drop_index(engine, workspace_id=workspace_id, field_id=field_id)
+
+    return status
+
+
+async def remove_declared_index(
+    engine: AsyncEngine,
+    *,
+    workspace_id: uuid.UUID,
+    field_id: uuid.UUID,
+) -> None:
+    """Drop the index behind a withdrawn declaration.
+
+    Failure is logged, not raised: the declaration row is already gone, so
+    raising here would fail a request that has, from the caller's point of
+    view, already succeeded.
+    """
+    try:
+        await drop_index(engine, workspace_id=workspace_id, field_id=field_id)
+    except Exception as exc:
+        logger.warning(
+            "indexed_field.drop_failed",
+            extra={"workspace_id": str(workspace_id), "field_id": str(field_id)},
+            exc_info=exc,
+        )

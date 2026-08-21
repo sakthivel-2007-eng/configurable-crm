@@ -17,6 +17,22 @@ Read `CLAUDE.md` and `03-configuration-model.md` first. Then this.
 Two defects are in `main` right now. Both are small to fix and both are the kind
 that get worse the longer they sit.
 
+> **Update, 21 Aug 2026 — both are fixed.** §0.1 in `4c07390`, §0.2 in `5f14730`.
+> The diagnoses below are left as written because they still explain *why* the
+> code looks the way it does; only the "Fix:" instructions are spent. Backend
+> suite is 381 green. Two things found while fixing §0.2 are worth carrying
+> forward, both now handled in `app/workers/indexing.py`:
+>
+> - `CREATE INDEX CONCURRENTLY` waits for **every** transaction older than
+>   itself. One client sitting idle-in-transaction stalls the build
+>   indefinitely rather than failing it. There is a `lock_timeout` on the build
+>   connection now, so a blocked build lands in `FAILED` where an admin can see
+>   it. The same rule bites in tests: a fixture holding an open transaction
+>   makes an index test *hang*, not fail.
+> - A failed build leaves the index behind marked `INVALID`, and the statement
+>   says `IF NOT EXISTS` — so without cleanup every retry would skip creation
+>   and report success over an index Postgres will not use.
+
 ### 0.1 `deactivate` no longer protects the pipeline — **fix this first**
 
 M1's headline guarantee is *"deactivating a member requires reassignment; never
@@ -177,6 +193,38 @@ cd web && pnpm tsc --noEmit && pnpm lint && pnpm format:check && pnpm exec playw
 
 ## 3. M6 — Lead list, filters, history filters *(8–10 days)*
 
+> **Update, 21 Aug 2026 — M6 has landed.** `3c6b2b4` (backend), `231d845`
+> (demo seed + latency harness), `c7db934` (frontend), plus quick filters.
+> Revision `0006_m6_filters`. 447 backend tests, 71 Playwright. Both acceptance
+> checks work through the builder against the 50k workspace, and p95 is 27–62ms
+> across seven query shapes against the 300ms budget.
+>
+> Four things the section below did not anticipate, all now settled:
+>
+> - **The DSL cannot express stage or assignee.** §6.1 defines a field rule as
+>   referencing `lead_fields.key`, and those two are columns. They are *quick
+>   filters* — query parameters beside the filter document, as
+>   `02-api-contract.md` has them — not DSL nodes. Do not add a pseudo-field key
+>   for them.
+> - **The JSONB key must reach SQL as a literal.** Postgres matches an
+>   expression index by comparing expression trees, so `values ->> $1` can never
+>   use an index built on `(values ->> 'budget')`. `compiler._json_path`
+>   re-validates the slug and interpolates it; values stay bound. Without this,
+>   declaring a field indexed does nothing.
+> - **Searchable is a property of the field *type*, not a toggle.** §1.4 lists
+>   exactly four field properties. `spec.searchable` in the registry decides.
+> - **`ScopedSession` stamps `session.info` permanently.** Wrapping a session
+>   scopes every later query on it, including ones made after the scoped work
+>   finishes. Use a fresh session for anything addressing another workspace.
+> - **The runtime `ix_lv_…` indexes are invisible to Alembic**, by design —
+>   they are the one sanctioned piece of runtime DDL (rule 7). M7 added an
+>   `include_object` filter to `alembic/env.py` so autogenerate neither reports
+>   them as drift nor writes a `drop_index` for them into the next revision.
+>
+> Not built, and deliberately: `saved_filters` reorder and duplicate exist on
+> the API and have tests, but the UI exposes neither yet — the sidebar that
+> would need them is M7's.
+
 The spec is `00-milestones.md` M6 and `PROMPTS.md` M6. What follows is what the
 spec does not tell you.
 
@@ -250,6 +298,35 @@ days" both work **through the builder**, and p95 < 300ms on the 50k workspace.
 ---
 
 ## 4. M7 — Tasks, bulk, import/export, undo *(7–9 days)*
+
+> **Update, 21 Aug 2026 — M7 has landed.** `26b0e20` (bulk + undo), `3b055ba`
+> (tasks, labels, imports), `9339ffa` (export, duplicates, merge), `2958832`
+> (frontend). Revision `0007_m7_work`. 522 backend tests, 86 Playwright. Both
+> acceptance checks pass: 300 leads bulk-edited and fully undone, and a
+> historical action import producing a coherent timeline.
+>
+> Five things this milestone settled that the section below does not say:
+>
+> - **Conflict detection is per-value, not per-timestamp.** "Is the lead's
+>   current value still the one the changeset set?" rather than "was this lead
+>   touched since". Cheaper, more precise, and it correctly *permits* an undo
+>   where somebody changed a value and changed it back.
+> - **An imported action may only be a contact kind.** A sheet must not be able
+>   to write a FIELD_CHANGE or STAGE_CHANGE — their payloads carry old/new
+>   values that undo would replay against a history that never happened.
+> - **`GET /leads/duplicates` does not group on identity.** `leads_identity_uq`
+>   makes identity duplicates impossible, so the contract's literal wording
+>   ships an always-empty screen. It groups on every phone and email the
+>   workspace holds instead.
+> - **`admin_access` only grants within groups a template names.** Root and
+>   Admin named no `tasks` group, so every task endpoint 403'd — and Root is
+>   `is_readonly`, so nobody could fix it from the UI. Provisioning is fixed and
+>   0007 backfills existing workspaces. **Any future milestone adding a
+>   capability group must do both.**
+> - **`alembic autogenerate` wanted to drop the runtime `ix_lv_*` indexes**,
+>   which would delete a live customer's index on deploy. `env.py` now filters
+>   them, which also retires the drift caveat noted under M6.
+
 
 ### The part that carries risk: undo
 
@@ -474,11 +551,11 @@ These are the ones that have actually caused rework here.
 ## 10. Suggested order
 
 ```
-0.1 LeadOwnership          ~1h   correctness bug in shipped code
-0.2 indexed-field worker   ~4h   M6 depends on it
-    demo seed (§8)         ~1d   M6's performance target depends on it
-M6  list + filters         8-10d
-M7  tasks, bulk, undo      7-9d
+0.1 LeadOwnership          done  4c07390
+0.2 indexed-field worker   done  5f14730
+    demo seed (§8)         done  231d845
+M6  list + filters         done  3c6b2b4 · 231d845 · c7db934
+M7  tasks, bulk, undo      done  26b0e20 · 3b055ba · 9339ffa · 2958832
 M8  assignment, scheduler  6-8d
 M9  dashboards, reports    6-8d
 M10 intake, outbox         5-7d

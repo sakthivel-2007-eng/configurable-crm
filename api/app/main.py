@@ -25,8 +25,11 @@ from app.routers import leads as leads_router
 from app.routers import members as members_router
 from app.routers import permission_templates as permission_templates_router
 from app.routers import pipeline as pipeline_router
+from app.routers import views as views_router
+from app.routers import work as work_router
 from app.routers import workspaces as workspaces_router
 from app.services.health import HealthService
+from app.services.lead_ownership import DatabaseLeadOwnership, set_lead_ownership
 from app.storage import create_s3_client
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
 
+    # `leads` exists from M5, so the member lifecycle gets the real open-lead
+    # count instead of the M1 placeholder that always answered zero. Registered
+    # here rather than in the lifespan: it is a stateless swap with no client to
+    # tear down, and a test building the app without entering the lifespan must
+    # still get the guarantee rather than the placeholder.
+    set_lead_ownership(DatabaseLeadOwnership())
+
     if resolved.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -107,6 +117,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pipeline_router.router, prefix=tenant_prefix)
     app.include_router(pipeline_router.custom_actions_router, prefix=tenant_prefix)
     app.include_router(leads_router.router, prefix=tenant_prefix)
+    app.include_router(views_router.router, prefix=tenant_prefix)
+    app.include_router(work_router.router, prefix=tenant_prefix)
 
     return app
 

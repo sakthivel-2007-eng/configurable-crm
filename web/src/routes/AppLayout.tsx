@@ -4,12 +4,15 @@ import { Button } from '@/components/ui/button'
 import { useAuth } from '@/features/auth/context'
 
 /**
- * Every tenant screen, in the order an admin meets them: work the leads, then
- * configure the schema that shapes them, then the pipeline, then who can see
- * what.
+ * Every tenant screen, in the order an admin meets them: work the leads and
+ * the follow-ups they generate, move data in and out, review what was changed,
+ * then configure the schema that shapes it all.
  */
 const NAV_LINKS = [
   { to: '/leads', label: 'Leads' },
+  { to: '/tasks', label: 'Tasks' },
+  { to: '/import', label: 'Import' },
+  { to: '/edit-report', label: 'Edit report' },
   { to: '/templates', label: 'Templates' },
   { to: '/members', label: 'Team' },
   { to: '/settings/fields', label: 'Fields' },

@@ -312,9 +312,12 @@ class MemberService:
         transferred = 0
         if open_leads > 0:
             if reassign_to_membership_id is None:
+                # Reachable for the first time now that open leads are counted
+                # for real, so it is worth reading like a sentence.
+                held = "1 open lead" if open_leads == 1 else f"{open_leads} open leads"
                 raise conflict(
                     "reassignment_required",
-                    f"This member holds {open_leads} open leads. "
+                    f"This member holds {held}. "
                     f"Provide reassign_to_membership_id to transfer them.",
                     open_lead_count=open_leads,
                 )
@@ -333,6 +336,7 @@ class MemberService:
                 self._session,
                 from_membership_id=membership.id,
                 to_membership_id=target.id,
+                actor_id=changed_by_id,
             )
 
         # Reports would otherwise dangle under a deactivated manager and drop

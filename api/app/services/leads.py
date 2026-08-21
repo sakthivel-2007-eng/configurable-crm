@@ -14,26 +14,56 @@ describes.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, or_, select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.errors import api_error, conflict, not_found
+from app.fields.search import SEARCH_CONFIG, search_text_for
 from app.fields.values import FieldValidationError, ValueValidator
-from app.models.enums import ChangesetSource, StageKind
-from app.models.field import FieldOption, LeadField
-from app.models.lead import Action, Lead
+from app.filters.compiler import FilterCompiler
+from app.filters.dsl import FilterNode, validate_shape
+from app.models.enums import ChangesetSource, IndexedFieldStatus, StageKind
+from app.models.field import FieldOption, IndexedField, LeadField
+from app.models.lead import Action, Changeset, Lead
 from app.models.pipeline import LostReason, Stage
 from app.models.workspace import Membership, Workspace
 from app.permissions.projection import FieldProjectionService, FieldWriteFilter
 from app.services.actions import ActionWriter, FieldDelta
 from app.tenancy.session import ScopedSession
 
-__all__ = ["LeadService"]
+__all__ = ["MAX_BULK_LEADS", "LeadService", "QuickFilters"]
+
+#: docs/02-api-contract.md — "Max 500". A larger batch is a job, not a
+#: request: it would hold a transaction open long enough to matter and
+#: produce an undo preview nobody can read.
+MAX_BULK_LEADS = 500
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QuickFilters:
+    """The one-click filters that live beside the DSL rather than inside it.
+
+    `docs/02-api-contract.md` gives `GET /leads` "quick filters" as a separate
+    concern from the filter document, and the split is the right one: these are
+    columns on `leads`, while a DSL field rule is by definition about a
+    workspace-defined field in `values`. Folding stage into the DSL would mean
+    inventing a pseudo-field key that no `lead_fields` row backs.
+    """
+
+    stage_id: uuid.UUID | None = None
+    assignee_id: uuid.UUID | None = None
+    unassigned: bool = False
+    rating: int | None = None
+    #: Structural pipeline kinds — "show me everything still open" without
+    #: naming stages the workspace may rename tomorrow.
+    stage_kinds: tuple[str, ...] = ()
 
 
 class LeadService:
@@ -158,14 +188,22 @@ class LeadService:
         )
         return rows.scalars().all(), int(total_result.scalar_one())
 
-    async def project(self, lead: Lead) -> dict[str, Any]:
+    async def project(self, lead: Lead, *, columns: Sequence[str] | None = None) -> dict[str, Any]:
         """The API representation, View-projected.
 
         The single place a lead becomes JSON. Every endpoint returns this, so
         there is no path by which a non-View field reaches a response.
+
+        `columns` narrows the hydrated values to what the caller asked for — a
+        50-field workspace should not ship 50 values per row to draw six
+        columns. It is applied *after* projection and can only ever subtract:
+        naming a field the caller cannot view does not reveal it.
         """
         validator = await self._load_schema()
         visible = self._projection.project_values(lead.values or {})
+        if columns is not None:
+            wanted = set(columns)
+            visible = {k: v for k, v in visible.items() if k in wanted}
 
         by_id = {f.id: f for f in self._fields}
         h1 = by_id.get(self._workspace.primary_field_1_id or uuid.uuid4())
@@ -238,6 +276,7 @@ class LeadService:
             created_by_id=self._actor_id,
         )
         self._session.add(lead)
+        self._refresh_search_vector(lead)
         await self._session.flush()
 
         writer = ActionWriter(self._session, actor_id=self._actor_id)
@@ -270,7 +309,7 @@ class LeadService:
         never talked about.
         """
         lead = await self.get_lead(lead_id)
-        validator = await self._load_schema()
+        await self._load_schema()
 
         writer = ActionWriter(self._session, actor_id=self._actor_id)
         await writer.open_changeset(
@@ -278,6 +317,42 @@ class LeadService:
             summary=f"Updated lead {lead.identity_value}",
             lead_count=1,
         )
+        await self._apply_update(
+            lead,
+            writer,
+            values=values,
+            stage_id=stage_id,
+            lost_reason_id=lost_reason_id,
+            assignee_id=assignee_id,
+            rating=rating,
+            unset=unset,
+        )
+        await self._session.flush()
+        return lead, writer
+
+    async def _apply_update(
+        self,
+        lead: Lead,
+        writer: ActionWriter,
+        *,
+        values: Mapping[str, Any] | None = None,
+        stage_id: uuid.UUID | None = None,
+        lost_reason_id: uuid.UUID | None = None,
+        assignee_id: uuid.UUID | None = None,
+        rating: int | None = None,
+        unset: frozenset[str] = frozenset(),
+    ) -> None:
+        """One lead's mutation, appended to an already-open changeset.
+
+        Shared by the single PATCH and by bulk edit so the two cannot drift.
+        That matters more than the deduplication: if bulk had its own copy, a
+        permission check or an action added to one would silently not exist in
+        the other, and the bulk path is the one that touches 500 leads at once.
+
+        Deliberately does not flush or open a changeset — the caller owns both,
+        which is what lets 500 leads share one batch.
+        """
+        validator = await self._load_schema()
 
         deltas: list[FieldDelta] = []
         if values or unset:
@@ -349,8 +424,339 @@ class LeadService:
             lead.rating = rating
             writer.record_rating_change(lead, old_rating=old_rating, new_rating=rating)
 
+        # After every mutation, not inside the `values` branch: the identity
+        # value feeds the vector too, and it can change on a path that touched
+        # no searchable field.
+        self._refresh_search_vector(lead)
+
+    async def bulk_update(
+        self,
+        *,
+        lead_ids: Sequence[uuid.UUID],
+        values: Mapping[str, Any] | None = None,
+        stage_id: uuid.UUID | None = None,
+        lost_reason_id: uuid.UUID | None = None,
+        assignee_id: uuid.UUID | None = None,
+        rating: int | None = None,
+        unset: frozenset[str] = frozenset(),
+    ) -> tuple[Changeset, list[Lead]]:
+        """Apply one change to many leads as a single undoable batch.
+
+        Three properties this has to hold, all of them load-bearing for M7's
+        undo:
+
+        1. **One changeset.** Every action the run produces carries its id, so
+           the whole batch reverses as a unit. A changeset per lead would make
+           "undo that mistake" 500 separate decisions.
+        2. **Permission-checked per field, once.** `_apply_update` runs the
+           write filter for every lead, and the filter refuses rather than
+           dropping — so a forbidden field fails the batch on the first lead
+           instead of writing 200 leads and then stopping.
+        3. **Capped.** 500 per the contract. A request that would touch more is
+           refused with the cap named, not silently truncated to the first 500 —
+           truncation would report success over work it did not do.
+        """
+        if not lead_ids:
+            raise api_error(422, "no_leads_selected", "Select at least one lead to edit")
+        if len(lead_ids) > MAX_BULK_LEADS:
+            raise api_error(
+                422,
+                "bulk_limit_exceeded",
+                f"A bulk edit may cover at most {MAX_BULK_LEADS} leads at once",
+                limit=MAX_BULK_LEADS,
+                requested=len(lead_ids),
+            )
+
+        await self._load_schema()
+
+        statement = self._session.select(Lead).where(
+            Lead.id.in_(list(lead_ids)), Lead.deleted_at.is_(None)
+        )
+        if (visibility := self._visibility_clause()) is not None:
+            statement = statement.where(visibility)
+        rows = await self._session.execute(statement)
+        leads = list(rows.scalars().all())
+
+        # Absent means deleted, another workspace's, or outside this caller's
+        # visibility. Refused rather than quietly edited-around: an operator who
+        # selected 300 leads and sees "297 updated" has learnt something about
+        # the three; one who sees 300 has been misled.
+        if len(leads) != len(set(lead_ids)):
+            found = {lead.id for lead in leads}
+            raise api_error(
+                404,
+                "leads_not_found",
+                "Some of the selected leads are no longer available to edit",
+                missing=[str(i) for i in dict.fromkeys(lead_ids) if i not in found],
+            )
+
+        writer = ActionWriter(self._session, actor_id=self._actor_id)
+        await writer.open_changeset(
+            source=ChangesetSource.BULK_EDIT,
+            summary=self._bulk_summary(values, stage_id, assignee_id, rating, unset, len(leads)),
+            lead_count=len(leads),
+        )
+        for lead in leads:
+            await self._apply_update(
+                lead,
+                writer,
+                values=values,
+                stage_id=stage_id,
+                lost_reason_id=lost_reason_id,
+                assignee_id=assignee_id,
+                rating=rating,
+                unset=unset,
+            )
         await self._session.flush()
-        return lead, writer
+        return writer.changeset, leads
+
+    def _bulk_summary(
+        self,
+        values: Mapping[str, Any] | None,
+        stage_id: uuid.UUID | None,
+        assignee_id: uuid.UUID | None,
+        rating: int | None,
+        unset: frozenset[str],
+        count: int,
+    ) -> str:
+        """What the edit report will show for this run.
+
+        Written at open time rather than derived afterwards, because the intent
+        ("Set Stage on 312 leads") is knowable now and unreconstructable later.
+        """
+        by_key = {f.key: f.label for f in self._fields}
+        changed = [by_key.get(key, key) for key in (values or {})]
+        changed += [by_key.get(key, key) for key in sorted(unset)]
+        if stage_id is not None:
+            changed.append("Stage")
+        if assignee_id is not None:
+            changed.append("Assignee")
+        if rating is not None:
+            changed.append("Rating")
+
+        what = ", ".join(changed) if changed else "nothing"
+        return f"Set {what} on {count} lead{'s' if count != 1 else ''}"
+
+    def _refresh_search_vector(self, lead: Lead) -> None:
+        """Recompute `search_vector` from the lead's searchable values.
+
+        Assigned as a SQL expression rather than a computed string so the
+        `to_tsvector` runs in Postgres with the same configuration the query
+        side uses — building it in Python would mean shipping a parsed vector
+        and trusting the two implementations to agree.
+
+        Called on every write path. A lead whose vector lagged its values would
+        be invisible to search, which is worse than being unindexed: the user
+        sees an empty result and concludes the lead is not there.
+        """
+        document = search_text_for(
+            lead.values or {}, self._fields, identity_value=lead.identity_value
+        )
+        lead.search_vector = func.to_tsvector(SEARCH_CONFIG, document)
+
+    # --- searching ---------------------------------------------------------
+
+    def sortable_columns(self) -> dict[str, Any]:
+        """Built-in columns a caller may sort by, by their API name.
+
+        Deliberately a closed set of real columns. Everything else has to be a
+        declared indexed field, because sorting 50,000 rows on an unindexed
+        JSONB expression is the one query shape that cannot be made fast after
+        the fact.
+        """
+        return {
+            "created_at": Lead.created_at,
+            "updated_at": Lead.updated_at,
+            "last_action_at": Lead.last_action_at,
+            "score": Lead.score,
+            "rating": Lead.rating,
+            "identity_value": Lead.identity_value,
+            "stage_id": Lead.stage_id,
+            "assignee_id": Lead.assignee_id,
+        }
+
+    async def _sort_expression(self, sort: str) -> Any:
+        """Resolve a sort key to a column, or refuse with the fix.
+
+        `-key` sorts descending, matching the API contract's `sort` parameter.
+        """
+        await self._load_schema()
+        descending = sort.startswith("-")
+        key = sort.lstrip("-")
+
+        if (column := self.sortable_columns().get(key)) is not None:
+            return column.desc().nullslast() if descending else column.asc().nullslast()
+
+        field = next((f for f in self._fields if f.key == key), None)
+        if field is None or not self._projection.filterable(key):
+            raise api_error(
+                400, "unknown_sort_field", f"There is no field named {key!r} to sort by"
+            )
+
+        rows = await self._session.execute(
+            self._session.select(IndexedField).where(IndexedField.field_id == field.id).limit(1)
+        )
+        declared: IndexedField | None = rows.scalar_one_or_none()
+        if declared is None:
+            raise api_error(
+                400,
+                "field_not_indexed",
+                f"{field.label} must be declared an indexed field before the list can "
+                f"be sorted by it. Settings -> Fields -> {field.label} -> Index.",
+                field_key=key,
+            )
+        if declared.status != IndexedFieldStatus.READY:
+            # Sorting on a PENDING declaration would work and be slow, which is
+            # exactly what the restriction exists to prevent. Distinguished from
+            # "not indexed" so the admin waits rather than re-declaring.
+            raise api_error(
+                400,
+                "index_not_ready",
+                f"The index on {field.label} is {declared.status.lower()}. "
+                f"Sorting by it will be available once the index finishes building.",
+                field_key=key,
+                status=declared.status,
+            )
+
+        # The literal spelling the expression index was built on — see
+        # `app.filters.compiler._json_path`.
+        expression: ColumnElement[Any] = literal_column(f"leads.values ->> '{field.key}'")
+        return expression.desc().nullslast() if descending else expression.asc().nullslast()
+
+    async def compile_filter(self, node: FilterNode | None) -> Any:
+        """Turn a filter document into a WHERE clause, or None for no filter.
+
+        The permission gate lives inside `FilterCompiler`, per field, so this
+        is a thin seam — but it is the seam every caller uses, which is what
+        keeps the gate from being skipped by a new endpoint.
+        """
+        if node is None:
+            return None
+        # The compiler resolves keys against the workspace's field definitions,
+        # and those are loaded lazily. Without this the field map is empty and
+        # every rule looks like a filter on a field nobody has.
+        await self._load_schema()
+        try:
+            validate_shape(node)
+        except ValueError as exc:
+            raise api_error(422, "invalid_filter", str(exc)) from exc
+
+        compiler = FilterCompiler(
+            fields=self._fields,
+            projection=self._projection,
+            timezone=self._workspace.timezone,
+        )
+        return compiler.compile(node)
+
+    async def count_by_stage(
+        self, clause: Any = None, quick: QuickFilters | None = None
+    ) -> tuple[int, dict[str, int]]:
+        """Total and per-stage counts for a filter, in one query.
+
+        Grouped rather than a count per stage: a workspace with a dozen stages
+        would otherwise pay a dozen full filter evaluations to draw one summary,
+        and a history predicate is not cheap enough to run twelve times.
+
+        Leads with no stage are counted in the total under a `null` key, so the
+        parts always sum to the whole.
+        """
+        await self._load_schema()
+        statement = self._session.select(Lead).where(Lead.deleted_at.is_(None))
+        if (visibility := self._visibility_clause()) is not None:
+            statement = statement.where(visibility)
+        if clause is not None:
+            statement = statement.where(clause)
+        for quick_clause in self._quick_filter_clauses(quick or QuickFilters()):
+            statement = statement.where(quick_clause)
+
+        subquery = statement.subquery()
+        rows = await self._session.execute(
+            select(subquery.c.stage_id, func.count())
+            .select_from(subquery)
+            .group_by(subquery.c.stage_id)
+        )
+        by_stage: dict[str, int] = {}
+        total = 0
+        for stage_id, count in rows.all():
+            by_stage[str(stage_id) if stage_id else "null"] = int(count)
+            total += int(count)
+        return total, by_stage
+
+    def _quick_filter_clauses(self, quick: QuickFilters) -> list[ColumnElement[bool]]:
+        """The current-state filters that are columns rather than fields.
+
+        Stage, assignee and rating live on `leads`, not in `values`, so the DSL
+        cannot reach them: §6.1 defines a field rule as referencing
+        `lead_fields.key`. They are the most-used filters in any CRM, which is
+        why the API contract gives `GET /leads` quick filters alongside the DSL
+        rather than folding them into it.
+        """
+        clauses: list[ColumnElement[bool]] = []
+        if quick.stage_id is not None:
+            clauses.append(Lead.stage_id == quick.stage_id)
+        if quick.assignee_id is not None:
+            clauses.append(Lead.assignee_id == quick.assignee_id)
+        if quick.unassigned:
+            # A separate flag rather than `assignee_id=null`: a query string
+            # cannot tell "no value given" from "explicitly nobody", and those
+            # mean opposite things here.
+            clauses.append(Lead.assignee_id.is_(None))
+        if quick.rating is not None:
+            clauses.append(Lead.rating == quick.rating)
+        if quick.stage_kinds:
+            closed = {StageKind.WON, StageKind.LOST}
+            wanted = {StageKind(kind) for kind in quick.stage_kinds}
+            stage_ids = select(Stage.id).where(Stage.kind.in_(wanted))
+            if closed & wanted:
+                clauses.append(Lead.stage_id.in_(stage_ids))
+            else:
+                # A stageless lead is open, so "open" must include it — the
+                # same NULL trap the ownership check has to sidestep.
+                clauses.append(or_(Lead.stage_id.is_(None), Lead.stage_id.in_(stage_ids)))
+        return clauses
+
+    async def search_leads(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        clause: Any = None,
+        search: str | None = None,
+        sort: str = "-created_at",
+        quick: QuickFilters | None = None,
+    ) -> tuple[Sequence[Lead], int]:
+        """The list endpoint's query: filter, search, sort, paginate.
+
+        Never returns actions (architecture rule 6) and never returns a lead
+        outside the caller's visibility.
+        """
+        statement = self._session.select(Lead).where(Lead.deleted_at.is_(None))
+        if (visibility := self._visibility_clause()) is not None:
+            statement = statement.where(visibility)
+        if clause is not None:
+            statement = statement.where(clause)
+        for quick_clause in self._quick_filter_clauses(quick or QuickFilters()):
+            statement = statement.where(quick_clause)
+        if search:
+            await self._load_schema()
+            compiler = FilterCompiler(
+                fields=self._fields,
+                projection=self._projection,
+                timezone=self._workspace.timezone,
+            )
+            statement = statement.where(compiler.search_clause(search))
+
+        total_result = await self._session.execute(
+            select(func.count()).select_from(statement.subquery())
+        )
+        order = await self._sort_expression(sort)
+        # `id` breaks ties: two leads created in the same millisecond would
+        # otherwise be ordered arbitrarily, and a row could appear on both page
+        # one and page two.
+        rows = await self._session.execute(
+            statement.order_by(order, Lead.id).limit(limit).offset(offset)
+        )
+        return rows.scalars().all(), int(total_result.scalar_one())
 
     async def soft_delete(self, lead_id: uuid.UUID) -> Lead:
         """Soft delete only (architecture rule 13). Leads never hard-delete."""

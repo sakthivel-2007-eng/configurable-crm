@@ -37,6 +37,17 @@ function Dialog({ open, onClose, title, description, children, footer, className
     }
   }, [open])
 
+  // Unmounted while closed, rather than hidden.
+  //
+  // A closed `<dialog>` keeps its children in the DOM and in the accessibility
+  // tree, so every label inside one stays addressable. Two dialogs on a screen
+  // with a "Name" field each — the lead quick-add and the save-filter form —
+  // make "the Name box" ambiguous for a screen reader and for any by-label
+  // query, even though the user can see only one of them. Unmounting also means
+  // a form is genuinely reset when it reopens rather than holding its last
+  // draft.
+  if (!open) return null
+
   return (
     <dialog
       ref={ref}

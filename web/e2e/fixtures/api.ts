@@ -617,6 +617,10 @@ export interface StubOptions {
   readonly leads?: ReturnType<typeof lead>[]
   /** When false, custom-action endpoints answer 403 feature_disabled. */
   readonly customActionsEnabled?: boolean
+  /** The undo preview `preview-undo` returns — the conflict path needs one. */
+  readonly undoPreview?: Record<string, unknown>
+  /** When false, every task endpoint answers 403 insufficient_permissions. */
+  readonly tasksAllowed?: boolean
 }
 
 export interface StubHandle {
@@ -625,6 +629,34 @@ export interface StubHandle {
   /** Forces the next N authenticated calls to answer 401. */
   expireAccessToken: () => void
   readonly refreshCount: () => number
+  /**
+   * The body of the last `POST /leads/search`.
+   *
+   * Lets a spec assert the *document the builder produced* — which is the only
+   * way to check that a history predicate was encoded correctly without
+   * reaching into component state or showing the user JSON.
+   */
+  readonly lastSearch: () => LastSearch | null
+  readonly lastBulk: () => { lead_ids?: string[]; values?: Record<string, unknown> } | null
+  readonly lastUndo: () => { skip_conflicts?: boolean } | null
+  readonly lastMapping: () => {
+    mapping?: Record<string, string>
+    options?: Record<string, unknown>
+  } | null
+}
+
+export interface LastSearch {
+  readonly filter?: {
+    readonly type?: string
+    readonly op?: string
+    readonly children?: readonly Record<string, unknown>[]
+  } | null
+  readonly q?: string | null
+  readonly sort?: string
+  readonly columns?: readonly string[] | null
+  readonly stage_id?: string | null
+  readonly assignee_id?: string | null
+  readonly unassigned?: boolean
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -640,6 +672,15 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
     members = [ownerDetail(), memberDetail()],
     openLeadCount = 0,
   } = options
+  const undoPreview = (options.undoPreview ?? {
+    changeset_id: 'changeset-bulk',
+    summary: 'Set Name on 3 leads',
+    is_undone: false,
+    counts: { total: 3, reversible: 3, conflicted: 0, deleted: 0 },
+    leads: [],
+  }) as {
+    counts: { total: number; reversible: number; conflicted: number; deleted: number }
+  }
 
   const requests: string[] = []
   let accessTokenExpired = false
@@ -647,6 +688,52 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
   let currentMembers = [...members]
   let currentFields = [...(options.fields ?? BUILTIN_FIELDS)]
   let currentLeads = [...(options.leads ?? [lead()])]
+  let savedFilters: Record<string, unknown>[] = []
+  let currentLayout: Record<string, unknown> | null = null
+  //: The last search body the page sent, so a spec can assert the *shape* of
+  //: the filter the builder produced without reading the component's state.
+  let lastSearchBody: LastSearch | null = null
+  interface StubTask {
+    id: string
+    lead_id: string | null
+    title: string
+    notes: string | null
+    due_at: string
+    assignee_id: string | null
+    completed_at: string | null
+    completed_by_id: string | null
+    created_at: string
+  }
+  let tasks: StubTask[] = [
+    {
+      id: 'task-late',
+      lead_id: null,
+      title: 'Chase the deposit',
+      notes: null,
+      due_at: '2020-01-01T09:00:00Z',
+      assignee_id: null,
+      completed_at: null,
+      completed_by_id: null,
+      created_at: '2019-12-01T09:00:00Z',
+    },
+  ]
+  interface StubLabel {
+    id: string
+    name: string
+    color: string | null
+    sort_order: number
+    is_archived: boolean
+  }
+  let labels: StubLabel[] = [
+    { id: 'label-hot', name: 'Hot', color: '#ef4444', sort_order: 0, is_archived: false },
+  ]
+  let appliedLabels: StubLabel[] = []
+  let importJob: Record<string, unknown> | null = null
+  //: The bodies the page last sent, so specs can assert what the UI *asked
+  //: for* rather than only what the stub echoed back.
+  let lastBulk: unknown = null
+  let lastUndo: unknown = null
+  let lastMapping: unknown = null
   let currentTemplates = [...MESSAGE_TEMPLATES]
   const customActionsEnabled = options.customActionsEnabled ?? true
 
@@ -908,6 +995,308 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
       })
     }
 
+    // --- M7: tasks, labels, undo, imports ---------------------------------
+    if (options.tasksAllowed === false && path.includes('/tasks')) {
+      return apiError(route, 403, 'insufficient_permissions')
+    }
+
+    if (/\/leads\/[^/]+\/tasks$/.test(path)) {
+      return json(route, 200, tasks)
+    }
+
+    if (path.endsWith('/tasks/counts') && method === 'GET') {
+      const now = Date.now()
+      return json(route, 200, {
+        upcoming: tasks.filter((t) => !t.completed_at && Date.parse(t.due_at) >= now).length,
+        late: tasks.filter((t) => !t.completed_at && Date.parse(t.due_at) < now).length,
+        done: tasks.filter((t) => t.completed_at).length,
+      })
+    }
+
+    if (path.endsWith('/tasks') && method === 'GET') {
+      // The bucket is the *server's* answer in the real API, computed in the
+      // workspace timezone. The stub reproduces the shape, not the timezone
+      // logic — the backend suite owns that.
+      const url = new URL(route.request().url())
+      const bucket = url.searchParams.get('bucket')
+      const now = Date.now()
+      const matching = tasks.filter((task) => {
+        if (bucket === 'done') return task.completed_at !== null
+        if (bucket === 'late') return !task.completed_at && Date.parse(task.due_at) < now
+        if (bucket === 'upcoming') return !task.completed_at && Date.parse(task.due_at) >= now
+        return true
+      })
+      return json(route, 200, {
+        items: matching,
+        total: matching.length,
+        limit: 100,
+        offset: 0,
+      })
+    }
+
+    if (path.endsWith('/tasks') && method === 'POST') {
+      const body = route.request().postDataJSON() as {
+        title?: string
+        due_at?: string
+        lead_id?: string | null
+        assignee_id?: string | null
+      }
+      const created = {
+        id: `task-${tasks.length + 1}`,
+        lead_id: body.lead_id ?? null,
+        title: body.title ?? 'Untitled',
+        notes: null,
+        due_at: body.due_at ?? '2026-09-01T09:00:00Z',
+        assignee_id: body.assignee_id ?? null,
+        completed_at: null,
+        completed_by_id: null,
+        created_at: '2026-08-21T09:00:00Z',
+      }
+      tasks = [...tasks, created]
+      return json(route, 201, created)
+    }
+
+    const taskCompleteMatch = /\/tasks\/([^/]+)\/complete$/.exec(path)
+    if (taskCompleteMatch) {
+      tasks = tasks.map((task) =>
+        task.id === taskCompleteMatch[1] ? { ...task, completed_at: '2026-08-21T10:00:00Z' } : task,
+      )
+      return json(
+        route,
+        200,
+        tasks.find((t) => t.id === taskCompleteMatch[1]),
+      )
+    }
+
+    const taskReopenMatch = /\/tasks\/([^/]+)\/reopen$/.exec(path)
+    if (taskReopenMatch) {
+      tasks = tasks.map((task) =>
+        task.id === taskReopenMatch[1] ? { ...task, completed_at: null } : task,
+      )
+      return json(
+        route,
+        200,
+        tasks.find((t) => t.id === taskReopenMatch[1]),
+      )
+    }
+
+    if (/\/leads\/[^/]+\/labels$/.test(path) && method === 'GET') {
+      return json(route, 200, appliedLabels)
+    }
+
+    const leadLabelMatch = /\/leads\/([^/]+)\/labels\/([^/]+)$/.exec(path)
+    if (leadLabelMatch) {
+      const label = labels.find((entry) => entry.id === leadLabelMatch[2])
+      if (method === 'POST' && label) appliedLabels = [...appliedLabels, label]
+      if (method === 'DELETE') {
+        appliedLabels = appliedLabels.filter((entry) => entry.id !== leadLabelMatch[2])
+      }
+      return json(route, 200, appliedLabels)
+    }
+
+    if (path.endsWith('/labels') && method === 'GET') {
+      return json(route, 200, labels)
+    }
+
+    if (path.endsWith('/labels') && method === 'POST') {
+      const body = route.request().postDataJSON() as { name?: string }
+      const created = {
+        id: `label-${labels.length + 1}`,
+        name: body.name ?? 'Label',
+        color: null,
+        sort_order: labels.length,
+        is_archived: false,
+      }
+      labels = [...labels, created]
+      return json(route, 201, created)
+    }
+
+    if (path.endsWith('/leads/bulk') && method === 'POST') {
+      const body = route.request().postDataJSON() as { lead_ids?: string[] }
+      lastBulk = body
+      return json(route, 200, {
+        changeset_id: 'changeset-bulk',
+        summary: `Set Name on ${body.lead_ids?.length ?? 0} leads`,
+        leads_updated: body.lead_ids?.length ?? 0,
+      })
+    }
+
+    const previewUndoMatch = /\/changesets\/([^/]+)\/preview-undo$/.exec(path)
+    if (previewUndoMatch) {
+      return json(route, 200, undoPreview)
+    }
+
+    const undoMatch = /\/changesets\/([^/]+)\/undo$/.exec(path)
+    if (undoMatch) {
+      const body = route.request().postDataJSON() as { skip_conflicts?: boolean }
+      lastUndo = body
+      const conflicted = undoPreview.counts.conflicted
+      if (conflicted > 0 && !body.skip_conflicts) {
+        return apiError(route, 409, 'undo_conflicts', undoPreview)
+      }
+      return json(route, 200, {
+        undo_changeset_id: 'changeset-undo',
+        undone_changeset_id: undoMatch[1],
+        leads_reverted: undoPreview.counts.reversible,
+        leads_skipped: conflicted,
+        skipped: [],
+      })
+    }
+
+    if (path.endsWith('/imports/fields') && method === 'GET') {
+      return json(
+        route,
+        200,
+        currentFields
+          .filter((field) => field.show_in_import)
+          .map((field) => ({
+            key: field.key,
+            label: field.label,
+            field_type: field.field_type,
+          })),
+      )
+    }
+
+    if (path.endsWith('/imports') && method === 'POST') {
+      importJob = {
+        id: 'import-1',
+        kind: new URL(route.request().url()).searchParams.get('kind') ?? 'LEAD_IMPORT',
+        status: 'UPLOADED',
+        filename: 'leads.csv',
+        source_columns: ['Phone', 'Name', 'Owner'],
+        mapping: {},
+        options: {},
+        result: {},
+        row_count: 3,
+        changeset_id: null,
+        error: null,
+        created_at: '2026-08-21T09:00:00Z',
+      }
+      return json(route, 201, importJob)
+    }
+
+    if (path.endsWith('/imports') && method === 'GET') {
+      return json(route, 200, {
+        items: importJob ? [importJob] : [],
+        total: importJob ? 1 : 0,
+        limit: 20,
+        offset: 0,
+      })
+    }
+
+    const mappingMatch = /\/imports\/([^/]+)\/mapping$/.exec(path)
+    if (mappingMatch && importJob) {
+      const body = route.request().postDataJSON() as {
+        mapping?: Record<string, string>
+        options?: Record<string, unknown>
+      }
+      lastMapping = body
+      importJob = {
+        ...importJob,
+        mapping: body.mapping ?? {},
+        options: body.options ?? {},
+        status: 'MAPPED',
+      }
+      return json(route, 200, importJob)
+    }
+
+    const previewMatch = /\/imports\/([^/]+)\/preview$/.exec(path)
+    if (previewMatch && importJob) {
+      importJob = {
+        ...importJob,
+        status: 'PREVIEWED',
+        result: {
+          counts: { create: 2, update: 1, error: 1 },
+          total: 4,
+          errors: [
+            {
+              row_number: 5,
+              status: 'error',
+              identity: null,
+              message: 'No value for Phone',
+            },
+          ],
+          errors_truncated: false,
+        },
+      }
+      return json(route, 200, importJob)
+    }
+
+    const commitMatch = /\/imports\/([^/]+)\/commit$/.exec(path)
+    if (commitMatch && importJob) {
+      importJob = { ...importJob, status: 'COMPLETED', changeset_id: 'changeset-import' }
+      return json(route, 200, importJob)
+    }
+
+    // --- M6: filtered search, saved filters, layouts ----------------------
+    // The stub does not evaluate the DSL — that is the backend's job and it has
+    // its own tests. What these specs check is that the builder *sends* a
+    // well-formed document and renders what comes back.
+    if (path.endsWith('/leads/search') && method === 'POST') {
+      const body = route.request().postDataJSON() as LastSearch
+      lastSearchBody = body
+      const filtered =
+        body.filter && Array.isArray(body.filter.children) && body.filter.children.length > 0
+          ? currentLeads.slice(0, 1)
+          : currentLeads
+      return json(route, 200, {
+        items: filtered,
+        total: filtered.length,
+        limit: 25,
+        offset: 0,
+      })
+    }
+
+    if (path.endsWith('/filters') && method === 'GET') {
+      return json(route, 200, savedFilters)
+    }
+
+    if (path.endsWith('/filters') && method === 'POST') {
+      const body = route.request().postDataJSON() as {
+        name?: string
+        definition?: unknown
+        visibility?: string
+        template_id?: string | null
+      }
+      const created = {
+        id: `filter-${savedFilters.length + 1}`,
+        name: body.name ?? 'Untitled',
+        description: null,
+        definition: body.definition,
+        visibility: body.visibility ?? 'PERSONAL',
+        template_id: body.template_id ?? null,
+        owner_membership_id: 'membership-1',
+        sort_order: savedFilters.length,
+        is_archived: false,
+        created_at: '2026-08-21T09:00:00Z',
+      }
+      savedFilters = [...savedFilters, created]
+      return json(route, 201, created)
+    }
+
+    const filterIdMatch = /\/filters\/([^/]+)$/.exec(path)
+    if (filterIdMatch && method === 'DELETE') {
+      savedFilters = savedFilters.filter((entry) => entry.id !== filterIdMatch[1])
+      return json(route, 200, { ...savedFilters[0], is_archived: true })
+    }
+
+    if (path.endsWith('/layouts') && method === 'GET') {
+      return json(route, 200, currentLayout)
+    }
+
+    if (path.endsWith('/layouts') && method === 'PUT') {
+      const body = route.request().postDataJSON() as { columns?: string[] }
+      currentLayout = {
+        id: 'layout-1',
+        filter_id: null,
+        columns: body.columns ?? [],
+        column_widths: {},
+        sort_key: null,
+        sort_desc: true,
+      }
+      return json(route, 200, currentLayout)
+    }
+
     // --- M5: leads, timeline, templates -----------------------------------
     if (path.endsWith('/leads') && method === 'GET') {
       return json(route, 200, {
@@ -1025,5 +1414,13 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
       accessTokenExpired = true
     },
     refreshCount: () => refreshCount,
+    lastSearch: () => lastSearchBody,
+    lastBulk: () => lastBulk as { lead_ids?: string[]; values?: Record<string, unknown> } | null,
+    lastUndo: () => lastUndo as { skip_conflicts?: boolean } | null,
+    lastMapping: () =>
+      lastMapping as {
+        mapping?: Record<string, string>
+        options?: Record<string, unknown>
+      } | null,
   }
 }

@@ -17,9 +17,12 @@ __all__ = [
     "ActionFieldType",
     "AvailabilityStatus",
     "ChangesetSource",
+    "ImportJobKind",
+    "ImportJobStatus",
     "IndexedFieldStatus",
     "LeadFieldType",
     "PermissionGrant",
+    "SavedFilterVisibility",
     "StageKind",
     "SystemActionKind",
     "TemplateChannel",
@@ -166,3 +169,58 @@ class TemplateChannel(enum.StrEnum):
     WHATSAPP = "WHATSAPP"
     SMS = "SMS"
     EMAIL = "EMAIL"
+
+
+class SavedFilterVisibility(enum.StrEnum):
+    """Who a saved filter is for (docs/01-data-model.md §6).
+
+    PERSONAL is the author's alone. SHARED is the whole workspace. ROLE hands
+    it to everyone on one permission template, which is how a manager gives
+    their callers a worklist without giving it to marketing.
+
+    Note this governs *visibility of the filter*, never of the leads it
+    returns: running someone else's filter still projects through the runner's
+    own field grants, so a shared filter cannot be used to read a column its
+    reader lacks.
+    """
+
+    PERSONAL = "PERSONAL"
+    SHARED = "SHARED"
+    ROLE = "ROLE"
+
+
+class ImportJobKind(enum.StrEnum):
+    """What a job run is doing (M7).
+
+    Four kinds rather than one with a flag, because the audit found four
+    genuinely different flows behind "upload a spreadsheet" and treating them
+    as one produced a mapping screen that could not express any of them
+    properly.
+    """
+
+    #: Create-or-update leads from a sheet, keyed on the identity field.
+    LEAD_IMPORT = "LEAD_IMPORT"
+    #: Update existing leads only. Distinct from LEAD_IMPORT so a typo in the
+    #: identity column fails the row instead of silently creating a lead.
+    LEAD_UPDATE = "LEAD_UPDATE"
+    #: Historical timeline migration — the flow every customer switching CRMs
+    #: needs, and the one the audit called out as missing.
+    ACTION_IMPORT = "ACTION_IMPORT"
+    EXPORT = "EXPORT"
+
+
+class ImportJobStatus(enum.StrEnum):
+    """Where a run has got to.
+
+    The operator maps, previews, then commits, and can stop after any of them —
+    so the intermediate states are real rather than transient.
+    """
+
+    UPLOADED = "UPLOADED"
+    #: A mapping has been stored but not yet dry-run.
+    MAPPED = "MAPPED"
+    #: Dry run complete; `result` holds the create/update counts.
+    PREVIEWED = "PREVIEWED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"

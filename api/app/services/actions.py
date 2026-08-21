@@ -210,6 +210,33 @@ class ActionWriter:
     def record_note(self, lead: Lead, *, body: str) -> Action:
         return self._append(lead, kind=SystemActionKind.NOTE, body=body)
 
+    def record_task(
+        self,
+        lead: Lead,
+        *,
+        completed: bool,
+        task_id: uuid.UUID,
+        title: str,
+        due_at: dt.datetime | None = None,
+    ) -> Action:
+        """A task appearing on, or leaving, a lead's timeline.
+
+        The timeline is the audit trail (rule 5), and "someone promised to call
+        this lead back on Thursday" belongs in it as much as the call itself.
+        `task_id` travels in the payload so the timeline entry can link to the
+        task rather than merely describing it.
+        """
+        return self._append(
+            lead,
+            kind=(SystemActionKind.TASK_COMPLETED if completed else SystemActionKind.TASK_CREATED),
+            payload={
+                "task_id": str(task_id),
+                "title": title,
+                "due_at": due_at.isoformat() if due_at else None,
+            },
+            body=title,
+        )
+
     def record_call(
         self,
         lead: Lead,
@@ -255,6 +282,40 @@ class ActionWriter:
                 # Explicit, so no reader mistakes this for a delivery receipt.
                 "delivery_confirmed": False,
             },
+        )
+
+    def record_imported(
+        self,
+        lead: Lead,
+        *,
+        kind: SystemActionKind,
+        performed_at: dt.datetime,
+        body: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+        action_type_id: uuid.UUID | None = None,
+        score_applied: int = 0,
+    ) -> Action:
+        """A historical event, migrated from another system (M7).
+
+        Predated on purpose. Every other writer here stamps `performed_at` with
+        now, because it is recording something that just happened; an imported
+        timeline is recording things that happened years ago, and one whose
+        events all landed at import o'clock is not a timeline.
+
+        Deliberately restricted to kinds that describe *contact* — the caller
+        chooses from `NOTE`, calls and messages. A sheet must not be able to
+        fabricate a `FIELD_CHANGE` or `STAGE_CHANGE`, whose payloads carry old
+        and new values that M7's undo would later try to replay against a
+        history that never happened.
+        """
+        return self._append(
+            lead,
+            kind=kind,
+            payload={**(payload or {}), "imported": True},
+            body=body,
+            action_type_id=action_type_id,
+            score_applied=score_applied,
+            performed_at=performed_at,
         )
 
     async def record_custom(

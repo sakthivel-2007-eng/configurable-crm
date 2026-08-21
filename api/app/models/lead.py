@@ -34,7 +34,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.enums import ChangesetSource, SystemActionKind, TemplateChannel
@@ -133,10 +133,27 @@ class Lead(TenantModel):
             postgresql_where=text("deleted_at IS NULL"),
         ),
         Index("leads_values_gin", "values", postgresql_using="gin"),
+        # Free-text search over the workspace's own fields. A workspace invents
+        # its fields, so there is no column to index — the vector is maintained
+        # on write from the searchable ones (`app.fields.search`).
+        Index("leads_search_idx", "search_vector", postgresql_using="gin"),
+        # Partial matching on the identity field. A tsquery matches whole
+        # lexemes, so "98765" would never find `+919876543210`; trigrams are
+        # what make typing a fragment of a phone number work.
+        Index(
+            "leads_identity_trgm",
+            "identity_value",
+            postgresql_using="gin",
+            postgresql_ops={"identity_value": "gin_trgm_ops"},
+        ),
         CheckConstraint("rating IS NULL OR rating BETWEEN 1 AND 5", name="ck_leads_rating_range"),
     )
 
     identity_value: Mapped[str] = mapped_column(String(320), nullable=False)
+    #: Maintained on write, never by a trigger: the searchable set is decided by
+    #: the type registry, which is Python, and a trigger would have to duplicate
+    #: that knowledge in PL/pgSQL and drift from it.
+    search_vector: Mapped[str | None] = mapped_column(TSVECTOR)
     #: Keyed by `lead_fields.key`. No per-customer columns, ever.
     values: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")

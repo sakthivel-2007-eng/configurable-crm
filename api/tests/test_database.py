@@ -84,10 +84,30 @@ M5_TABLES = {
     "message_templates",
 }
 
+# M6 stores what a list *view* is — the question and the columns — and nothing
+# about results. `labels`, `lead_labels` and `tasks` share §6 of the data model
+# but belong to M7, so they are deliberately absent here.
+M6_TABLES = {
+    "saved_filters",
+    "table_layouts",
+}
+
+# M7 owns the rest of §6's list plus the job table every import and export
+# answers with. `outbox_events`, `webhook_endpoints`, `api_keys` and
+# `intake_log` share that section but belong to M10.
+M7_TABLES = {
+    "tasks",
+    "labels",
+    "lead_labels",
+    "import_jobs",
+}
+
 
 def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
     """No table exists before the milestone that owns it."""
-    assert set(Base.metadata.tables) == (M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES)
+    assert set(Base.metadata.tables) == (
+        M1_TABLES | M2_TABLES | M3_TABLES | M4_TABLES | M5_TABLES | M6_TABLES | M7_TABLES
+    )
 
 
 def test_no_table_name_encodes_a_business_concept() -> None:

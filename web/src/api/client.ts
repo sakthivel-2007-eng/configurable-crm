@@ -212,6 +212,49 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   }
 }
 
+/**
+ * Fetch a file and hand it to the browser to save.
+ *
+ * Not a plain navigation: every tenant endpoint needs the `Authorization`
+ * header, and a `window.location` assignment sends cookies rather than a
+ * bearer token — the request would 401 and the user would see a blank tab.
+ *
+ * The server's `Content-Disposition` still decides the filename; `fallback` is
+ * only used when the header is absent.
+ */
+export async function downloadFile(path: string, fallback: string): Promise<void> {
+  let response = await send(path, { method: 'GET' })
+  if (response.status === 401) {
+    // Same refresh-and-retry the JSON path gets: a download started just as an
+    // access token expired should not dump the user back at the login screen.
+    const refreshed = await refreshTokens()
+    if (!refreshed) {
+      setTokens(null)
+      onSessionEnded()
+      throw await parseError(response, path)
+    }
+    response = await send(path, { method: 'GET' })
+  }
+  if (!response.ok) {
+    throw await parseError(response, path)
+  }
+
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const match = /filename="([^"]+)"/.exec(disposition)
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = match?.[1] ?? fallback
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  // Revoked on the next tick: revoking synchronously can race the download in
+  // some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
 export const api = {
   get: <T>(path: string, options?: Omit<RequestOptions, 'method' | 'body'>) =>
     apiRequest<T>(path, { ...options, method: 'GET' }),

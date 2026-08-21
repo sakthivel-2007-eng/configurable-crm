@@ -47,6 +47,8 @@ import {
   useUpdateLead,
 } from '@/features/leads/api'
 import { LeadTimeline } from '@/features/leads/LeadTimeline'
+import { LeadLabels } from '@/features/work/LeadLabels'
+import { LeadTasks } from '@/features/work/LeadTasks'
 
 interface LeadDetailProps {
   readonly workspaceId: string
@@ -370,6 +372,10 @@ export function LeadDetail({
           }
         />
       </section>
+
+      <LeadLabels workspaceId={workspaceId} leadId={lead.id} />
+
+      <LeadTasks workspaceId={workspaceId} leadId={lead.id} />
 
       <section className="border-t pt-4">
         <h3 className="mb-3 text-sm font-medium">Timeline</h3>

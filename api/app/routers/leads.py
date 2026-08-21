@@ -11,30 +11,38 @@ people remember.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
+from sqlalchemy import func, select
 
 from app.errors import api_error, not_found
-from app.models.enums import ChangesetSource, SystemActionKind, TemplateChannel
+from app.models.enums import ChangesetSource, StageKind, SystemActionKind, TemplateChannel
 from app.models.field import CustomActionType
-from app.models.lead import Changeset
+from app.models.lead import Action, Changeset
 from app.models.pipeline import CallDisposition
 from app.schemas.common import Page
+from app.schemas.filter import LeadSearchRequest
 from app.schemas.lead import (
     ActionRead,
     CallLogCreate,
     ChangesetRead,
     CustomActionLog,
+    LeadBulkUpdate,
     LeadCreate,
+    LeadMerge,
     LeadUpdate,
     MessageTemplateCreate,
     NoteCreate,
     TemplateRenderRequest,
+    UndoRequest,
 )
-from app.services.leads import LeadService
+from app.services.exporting import ExportService
+from app.services.leads import LeadService, QuickFilters
 from app.services.templates import MessageTemplateService
+from app.services.undo import UndoService
 from app.tenancy.scoping import WorkspaceScope, require_workspace
 
 router = APIRouter(tags=["leads"])
@@ -52,6 +60,38 @@ async def _lead_service(
         actor_id=scope.membership_id,
         visible_membership_ids=scope.visible_membership_ids,
         sees_all=scope.sees_all_members,
+    )
+
+
+async def _undo_service(
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> UndoService:
+    """Undo is a lead write, so it gets the same bound chokepoints."""
+    return UndoService(
+        scope.session,
+        workspace=scope.workspace,
+        projection=await scope.projection(),
+        write_filter=await scope.write_filter(),
+        actor_id=scope.membership_id,
+        visible_membership_ids=scope.visible_membership_ids,
+        sees_all=scope.sees_all_members,
+    )
+
+
+async def _export_service(request: Request, scope: WorkspaceScope) -> ExportService:
+    """Built inline rather than as a dependency.
+
+    It needs both the request (for the S3 client on app state) and an already
+    resolved scope, and three endpoints share it — a `Depends` wrapper would be
+    the same three lines with an extra layer.
+    """
+    return ExportService(
+        scope.session,
+        workspace=scope.workspace,
+        projection=await scope.projection(),
+        actor_id=scope.membership_id,
+        storage=getattr(request.app.state, "s3", None),
+        bucket=request.app.state.settings.s3_bucket,
     )
 
 
@@ -79,15 +119,177 @@ async def list_leads(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
     q: Annotated[str | None, Query(max_length=200)] = None,
+    sort: Annotated[str, Query(max_length=80)] = "-created_at",
+    columns: Annotated[list[str] | None, Query()] = None,
+    stage_id: Annotated[uuid.UUID | None, Query()] = None,
+    assignee_id: Annotated[uuid.UUID | None, Query()] = None,
+    unassigned: Annotated[bool, Query()] = False,
+    rating: Annotated[int | None, Query(ge=1, le=5)] = None,
+    stage_kinds: Annotated[list[StageKind] | None, Query()] = None,
 ) -> Page[dict[str, Any]]:
-    """Architecture rule 6: the list endpoint never returns actions."""
-    leads, total = await service.list_leads(limit=limit, offset=offset, search=q)
+    """Architecture rule 6: the list endpoint never returns actions.
+
+    The quick path: search, sort and the one-click filters. Anything structured
+    goes to `POST /leads/search`, which speaks the same DSL a saved filter does
+    and accepts the same quick filters alongside it.
+    """
+    leads, total = await service.search_leads(
+        limit=limit,
+        offset=offset,
+        search=q,
+        sort=sort,
+        quick=QuickFilters(
+            stage_id=stage_id,
+            assignee_id=assignee_id,
+            unassigned=unassigned,
+            rating=rating,
+            stage_kinds=tuple(kind.value for kind in stage_kinds or ()),
+        ),
+    )
     return Page(
-        items=[await service.project(lead) for lead in leads],
+        items=[await service.project(lead, columns=columns) for lead in leads],
         total=total,
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("/leads/search", summary="List leads matching a filter DSL document")
+async def search_leads(
+    payload: LeadSearchRequest,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[LeadService, Depends(_lead_service)],
+) -> Page[dict[str, Any]]:
+    """The full filter DSL, including the four history predicates.
+
+    Declared before `/leads/{lead_id}`: FastAPI matches in declaration order,
+    so a literal segment after a uuid placeholder would be parsed as an id and
+    422 (conventions §5 — this has bitten twice already).
+    """
+    clause = await service.compile_filter(payload.filter)
+    leads, total = await service.search_leads(
+        limit=payload.limit,
+        offset=payload.offset,
+        clause=clause,
+        search=payload.q,
+        sort=payload.sort,
+        quick=QuickFilters(
+            stage_id=payload.stage_id,
+            assignee_id=payload.assignee_id,
+            unassigned=payload.unassigned,
+            rating=payload.rating,
+            stage_kinds=tuple(kind.value for kind in payload.stage_kinds),
+        ),
+    )
+    return Page(
+        items=[await service.project(lead, columns=payload.columns) for lead in leads],
+        total=total,
+        limit=payload.limit,
+        offset=payload.offset,
+    )
+
+
+@router.post("/leads/bulk", summary="Apply one change to many leads")
+async def bulk_update_leads(
+    payload: LeadBulkUpdate,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[LeadService, Depends(_lead_service)],
+) -> dict[str, Any]:
+    """One changeset for the whole run, so the batch undoes as a unit.
+
+    Declared before `/leads/{lead_id}` — conventions §5.
+    """
+    _require(scope, "bulk_edit")
+    changeset, leads = await service.bulk_update(
+        lead_ids=payload.lead_ids,
+        values=payload.values,
+        stage_id=payload.stage_id,
+        lost_reason_id=payload.lost_reason_id,
+        assignee_id=payload.assignee_id,
+        rating=payload.rating,
+        unset=frozenset(payload.unset or ()),
+    )
+    await scope.session.commit()
+    return {
+        "changeset_id": str(changeset.id),
+        "summary": changeset.summary,
+        "leads_updated": len(leads),
+    }
+
+
+@router.post("/leads/export", summary="Export the Export-granted columns")
+async def export_leads(
+    payload: LeadSearchRequest,
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[LeadService, Depends(_lead_service)],
+) -> dict[str, Any]:
+    """Refused outright when the template exports nothing.
+
+    An empty file looks like a bug and invites a retry; `403 nothing_exportable`
+    says what is actually wrong. `Export (0) None` is the observed default and a
+    deliberate exfiltration control, not an oversight to work around.
+
+    Takes the same filter document the list does, so "export what I am looking
+    at" is one call rather than a second query language.
+    """
+    exporter = await _export_service(request, scope)
+    clause = await service.compile_filter(payload.filter)
+    job = await exporter.export(clause=clause)
+    await scope.session.commit()
+    return {
+        "job_id": str(job.id),
+        "filename": job.filename,
+        "row_count": job.row_count,
+        "columns": job.result.get("columns", []),
+    }
+
+
+@router.get("/leads/export/{job_id}", summary="Download a finished export")
+async def download_export(
+    job_id: uuid.UUID,
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> Response:
+    exporter = await _export_service(request, scope)
+    filename, content = await exporter.download(job_id)
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/leads/duplicates", summary="Leads that look like the same person")
+async def lead_duplicates(
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[dict[str, Any]]:
+    """Grouped on every phone and email the workspace holds, not on the identity
+    field alone — that one is unique by construction, so grouping on it would
+    always return nothing."""
+    exporter = await _export_service(request, scope)
+    groups = await exporter.duplicates(limit=limit)
+    return [group.as_payload() for group in groups]
+
+
+@router.post("/leads/merge", summary="Fold several leads into one")
+async def merge_leads(
+    payload: LeadMerge,
+    request: Request,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> dict[str, Any]:
+    """Timeline, tasks and labels move to the primary; the others are soft-deleted.
+
+    Values fill blanks only: the primary's own data stays authoritative, which
+    makes the outcome predictable rather than last-write-wins.
+    """
+    _require(scope, "merge_leads")
+    exporter = await _export_service(request, scope)
+    result = await exporter.merge(primary_id=payload.primary_id, merge_ids=payload.merge_ids)
+    await scope.session.commit()
+    return result
 
 
 @router.post("/leads", status_code=status.HTTP_201_CREATED, summary="Create a lead")
@@ -285,21 +487,95 @@ async def list_changesets(
     scope: Annotated[WorkspaceScope, Depends(require_workspace)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
+    source: Annotated[ChangesetSource | None, Query()] = None,
+    actor_id: Annotated[uuid.UUID | None, Query()] = None,
+    date_from: Annotated[dt.datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.datetime | None, Query(alias="to")] = None,
+    undone: Annotated[bool | None, Query()] = None,
 ) -> Page[ChangesetRead]:
-    """Every mutation batch, newest first.
+    """Every mutation batch, newest first, filterable by source, actor and date.
 
-    M7 adds preview-undo and undo on top; the record they operate on is written
-    from M5 onward, which is the point of building changesets now.
+    The filters are what makes this an edit report rather than a log: "what did
+    the 9am import do" and "what has Priya changed today" are the two questions
+    anyone actually brings to it.
     """
-    rows, total = await scope.session.list(
-        Changeset, limit=limit, offset=offset, order_by=Changeset.created_at.desc()
+    statement = scope.session.select(Changeset)
+    if source is not None:
+        statement = statement.where(Changeset.source == source)
+    if actor_id is not None:
+        statement = statement.where(Changeset.actor_id == actor_id)
+    if date_from is not None:
+        statement = statement.where(Changeset.created_at >= date_from)
+    if date_to is not None:
+        statement = statement.where(Changeset.created_at <= date_to)
+    if undone is not None:
+        statement = statement.where(Changeset.is_undone.is_(undone))
+
+    total_result = await scope.session.execute(
+        select(func.count()).select_from(statement.subquery())
+    )
+    rows = await scope.session.execute(
+        statement.order_by(Changeset.created_at.desc()).limit(limit).offset(offset)
     )
     return Page(
-        items=[ChangesetRead.model_validate(c) for c in rows],
-        total=total,
+        items=[ChangesetRead.model_validate(c) for c in rows.scalars().all()],
+        total=int(total_result.scalar_one()),
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/changesets/{changeset_id}", summary="A changeset and what it produced")
+async def get_changeset(
+    changeset_id: uuid.UUID,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+) -> dict[str, Any]:
+    changeset = await scope.session.get(Changeset, changeset_id)
+    if changeset is None:
+        raise not_found("Changeset")
+
+    rows = await scope.session.execute(
+        scope.session.select(Action)
+        .where(Action.changeset_id == changeset_id)
+        .order_by(Action.performed_at)
+        .limit(500)
+    )
+    return {
+        **ChangesetRead.model_validate(changeset).model_dump(mode="json"),
+        "actions": [ActionRead.model_validate(a).model_dump(mode="json") for a in rows.scalars()],
+    }
+
+
+@router.post("/changesets/{changeset_id}/preview-undo", summary="What undoing this would do")
+async def preview_undo(
+    changeset_id: uuid.UUID,
+    service: Annotated[UndoService, Depends(_undo_service)],
+) -> dict[str, Any]:
+    """Per lead: reversible, conflicted, already-undone or deleted.
+
+    A read, so it is safe to call as often as the UI likes — the operator sees
+    the consequences before choosing.
+    """
+    preview = await service.preview_undo(changeset_id)
+    return preview.as_payload()
+
+
+@router.post("/changesets/{changeset_id}/undo", summary="Reverse a changeset")
+async def undo_changeset(
+    changeset_id: uuid.UUID,
+    payload: UndoRequest,
+    scope: Annotated[WorkspaceScope, Depends(require_workspace)],
+    service: Annotated[UndoService, Depends(_undo_service)],
+) -> dict[str, Any]:
+    """Refuses with `409 undo_conflicts` unless the caller opted into skipping.
+
+    Gated on `bulk_edit`: an undo is a batch mutation, and the field-level Edit
+    grants still apply to every value it puts back.
+    """
+    _require(scope, "bulk_edit")
+    result = await service.undo(changeset_id, skip_conflicts=payload.skip_conflicts)
+    await scope.session.commit()
+    return result
 
 
 # --- message templates -------------------------------------------------------

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
 from io import BytesIO
 
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 from openpyxl import Workbook
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.factories import (
     WorkspaceFixture,
@@ -17,6 +19,7 @@ from tests.factories import (
 )
 
 from app.auth.passwords import PasswordHasherService
+from app.models.lead import Lead
 from app.tenancy.session import ScopedSession
 
 pytestmark = pytest.mark.integration
@@ -336,6 +339,7 @@ async def test_deactivation_refuses_when_the_member_holds_open_leads(
             *,
             from_membership_id: object,
             to_membership_id: object,
+            actor_id: object = None,
         ) -> int:
             return 42
 
@@ -372,6 +376,7 @@ async def test_deactivation_with_a_target_transfers_the_pipeline(
             *,
             from_membership_id: object,
             to_membership_id: object,
+            actor_id: object = None,
         ) -> int:
             transfers.append((from_membership_id, to_membership_id))
             return 7
@@ -712,3 +717,177 @@ async def test_bulk_upload_rejects_a_file_that_is_not_a_workbook(
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "invalid_workbook"
+
+
+# --- deactivation against real leads -----------------------------------------
+#
+# The tests above inject a fake `LeadOwnership`, which is the right shape for
+# testing the endpoint's contract but says nothing about whether anything
+# counts leads for real. Between M5 and this milestone nothing did: the port
+# was never registered, so `count_open_leads` always answered zero and the
+# 409 below was unreachable in production. These exercise the real
+# implementation against real rows.
+
+
+async def _stages(api: AsyncClient, team: WorkspaceFixture) -> dict[str, str]:
+    response = await api.get(team.path("/settings/stages"), headers=team.owner.auth)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return {
+        "initial": body["initial"]["id"],
+        "won": body["won"]["id"],
+        "lost": body["lost"]["id"],
+    }
+
+
+async def _lead_for(
+    api: AsyncClient,
+    team: WorkspaceFixture,
+    *,
+    phone: str,
+    assignee_id: uuid.UUID | None,
+    stage_id: str | None = None,
+) -> str:
+    payload: dict[str, object] = {
+        "values": {"name": f"Lead {phone}", "phone": phone},
+        "assignee_id": str(assignee_id) if assignee_id else None,
+    }
+    if stage_id is not None:
+        payload["stage_id"] = stage_id
+    response = await api.post(team.path("/leads"), headers=team.owner.auth, json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+async def test_deactivation_counts_the_members_real_open_leads(
+    api: AsyncClient,
+    team: WorkspaceFixture,
+) -> None:
+    """The guarantee M1 advertised, now actually enforced end to end."""
+    rep = team.members["rep"]
+    for phone in ("9000000001", "9000000002", "9000000003"):
+        await _lead_for(api, team, phone=phone, assignee_id=rep.membership.id)
+
+    response = await api.post(
+        team.path(f"/members/{rep.membership.id}/deactivate"),
+        headers=team.owner.auth,
+        json={},
+    )
+
+    assert response.status_code == 409, response.text
+    body = response.json()["detail"]
+    assert body["code"] == "reassignment_required"
+    assert body["open_lead_count"] == 3
+
+
+async def test_won_and_lost_leads_are_not_open_pipeline(
+    api: AsyncClient,
+    team: WorkspaceFixture,
+) -> None:
+    """A closed lead is history. Whoever won it can leave without a handover."""
+    rep = team.members["rep"]
+    stages = await _stages(api, team)
+    await _lead_for(
+        api, team, phone="9000000010", assignee_id=rep.membership.id, stage_id=stages["won"]
+    )
+    await _lead_for(
+        api, team, phone="9000000011", assignee_id=rep.membership.id, stage_id=stages["lost"]
+    )
+
+    response = await api.post(
+        team.path(f"/members/{rep.membership.id}/deactivate"),
+        headers=team.owner.auth,
+        json={},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["leads_reassigned"] == 0
+
+
+async def test_a_lead_whose_stage_was_deleted_still_counts_as_open(
+    api: AsyncClient,
+    team: WorkspaceFixture,
+    db_session: AsyncSession,
+) -> None:
+    """`stage_id` is ON DELETE SET NULL, so a stageless lead is a real state.
+
+    It has certainly not been won or lost, so it is open. Worth its own test
+    because the obvious spellings — an inner join to `stages`, or a bare
+    `stage_id NOT IN (closed)` where `NULL NOT IN (...)` is `NULL` rather than
+    `TRUE` — both silently drop exactly these rows, which is the orphaning this
+    check exists to prevent.
+    """
+    rep = team.members["rep"]
+    lead_id = await _lead_for(api, team, phone="9000000020", assignee_id=rep.membership.id)
+
+    await db_session.execute(
+        update(Lead).where(Lead.id == uuid.UUID(lead_id)).values(stage_id=None)
+    )
+    await db_session.commit()
+
+    response = await api.post(
+        team.path(f"/members/{rep.membership.id}/deactivate"),
+        headers=team.owner.auth,
+        json={},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["open_lead_count"] == 1
+
+
+async def test_reassignment_moves_the_pipeline_and_writes_the_audit_trail(
+    api: AsyncClient,
+    team: WorkspaceFixture,
+) -> None:
+    """One changeset, one ASSIGNMENT_CHANGE per lead, both ids in the payload."""
+    rep = team.members["rep"]
+    manager = team.members["manager"]
+    stages = await _stages(api, team)
+    open_ids = [
+        await _lead_for(api, team, phone="9000000030", assignee_id=rep.membership.id),
+        await _lead_for(api, team, phone="9000000031", assignee_id=rep.membership.id),
+    ]
+    # A won lead stays put: it is not pipeline, so it is not handed over.
+    won_id = await _lead_for(
+        api, team, phone="9000000032", assignee_id=rep.membership.id, stage_id=stages["won"]
+    )
+
+    response = await api.post(
+        team.path(f"/members/{rep.membership.id}/deactivate"),
+        headers=team.owner.auth,
+        json={"reassign_to_membership_id": str(manager.membership.id)},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["leads_reassigned"] == 2
+
+    changesets: set[str] = set()
+    for lead_id in open_ids:
+        detail = await api.get(team.path(f"/leads/{lead_id}"), headers=team.owner.auth)
+        assert detail.json()["assignee_id"] == str(manager.membership.id)
+
+        actions = await api.get(team.path(f"/leads/{lead_id}/actions"), headers=team.owner.auth)
+        moves = [a for a in actions.json()["items"] if a["kind"] == "ASSIGNMENT_CHANGE"]
+        # Two: the assignment made at creation, then the handover. Rule 5b puts
+        # both ids in every payload, which is what lets M6 ask "what moved off
+        # this rep" without a self-join over the timeline. Compared as a set
+        # rather than a sequence — the timeline is ordered by `performed_at`,
+        # and asserting on that here would be testing the clock.
+        assert {
+            (m["payload"]["old_assignee_id"], m["payload"]["new_assignee_id"]) for m in moves
+        } == {
+            (None, str(rep.membership.id)),
+            (str(rep.membership.id), str(manager.membership.id)),
+        }
+
+        (handover,) = [
+            m for m in moves if m["payload"]["new_assignee_id"] == str(manager.membership.id)
+        ]
+        assert handover["actor_id"] == str(team.owner.membership.id)
+        changesets.add(handover["changeset_id"])
+
+    # Rule 5a: the whole transfer is one batch, so M7 can undo it as a unit.
+    assert len(changesets) == 1
+
+    untouched = await api.get(team.path(f"/leads/{won_id}"), headers=team.owner.auth)
+    assert untouched.json()["assignee_id"] == str(rep.membership.id)

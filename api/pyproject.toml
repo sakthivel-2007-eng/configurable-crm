@@ -101,6 +101,7 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 markers = [
     "integration: requires a real container (Postgres via testcontainers)",
+    "performance: seeds the 50k demo workspace and asserts the latency targets",
 ]
 
 [tool.coverage.run]

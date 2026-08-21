@@ -291,15 +291,27 @@ with the first implementation.
 
 ---
 
-## 9. Open decisions
+## 9. Decisions
+
+**Settled 21 Aug 2026:**
+
+- **The CRM does not store call recordings.** Bolna hosts them; operators
+  retrieve them there. §5's `recording_url` is passed through to the timeline
+  and nothing is copied into this product's object storage. This is the smaller
+  surface: no retention period to honour, no erasure request to service, and no
+  recordings in a breach.
+- **Calling-hours and DNC enforcement are out of scope for the product.** No
+  calling window, no suppression list, no consent model. Whoever operates a
+  workspace remains responsible for how and when it dials; the CRM neither helps
+  nor hinders. Worth writing down because an autonomous trigger has no judgement
+  about the hour, where a human telecaller does — so this is a deliberate
+  choice, not an oversight to be rediscovered later.
+
+**Still open:**
 
 1. **What triggers a call?** Manual button, assignment rule, stage entry, or a
    campaign. Assume manual-plus-API for v1 unless decided otherwise.
 2. **Concurrency cap per workspace** — Bolna enforces one; the CRM should
    refuse to enqueue beyond it rather than discovering it as errors.
-3. **Recording URL retention.** Bolna hosts it. Does the CRM copy to its own S3?
-   Storing it means owning a retention and consent obligation.
-4. **Consent and calling hours.** TRAI hours and DNC are a compliance surface
-   with real penalties. Not modelled anywhere yet. Needs an owner.
-5. Does a failed call create a task for a human to follow up? Probably, but it
+3. Does a failed call create a task for a human to follow up? Probably, but it
    is a policy, so it belongs in configuration.

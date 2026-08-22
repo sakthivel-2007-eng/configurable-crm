@@ -118,8 +118,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No .env is written on purpose: docker-compose.yml carries local defaults
-      # for every variable, so this is exactly what a fresh clone does.
+      # `docker-compose.yml` deliberately refuses to start without a signing
+      # key — an unset one must stop the container rather than let it sign
+      # tokens with something predictable. CI is not exempt from that, so it
+      # brings a throwaway key rather than the compose file growing a default
+      # that a real deployment might inherit.
+      #
+      # Written to $GITHUB_ENV, not the step, because `compose logs` and
+      # `compose down` interpolate the same file and would fail without it.
+      #
+      # (This job had been red since M0: the comment here used to claim compose
+      # carried a default for every variable, and it never did for this one.)
+      - name: Throwaway signing key
+        run: echo "JWT_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+      # Everything else takes the local defaults in docker-compose.yml, so this
+      # is otherwise exactly what a fresh clone does.
       - name: docker compose up
         run: docker compose up -d --build --wait --wait-timeout 300
 

@@ -23,7 +23,12 @@ from sqlalchemy.sql import Executable
 
 from app.models.mixins import Base, TenantModel, TenantScoped
 
-__all__ = ["ScopedSession", "WorkspaceMismatchError"]
+__all__ = [
+    "ScopedSession",
+    "WorkspaceMismatchError",
+    "bind_scope",
+    "current_scope",
+]
 
 #: Anything carrying `workspace_id` — including composite-keyed tables.
 TenantT = TypeVar("TenantT", bound=TenantScoped)
@@ -35,6 +40,27 @@ KeyedT = TypeVar("KeyedT", bound=TenantModel)
 # Key under which the active workspace is stashed on the SQLAlchemy session's
 # `info` dict, where the ORM execute listener below can find it.
 _SCOPE_KEY = "crm_workspace_id"
+
+
+def bind_scope(session: AsyncSession, workspace_id: uuid.UUID | None) -> None:
+    """Point a session's tenant scope at `workspace_id`.
+
+    The scope lives on the session, not on the `ScopedSession` wrapper, so any
+    code that reads a *different* workspace through the same session must move
+    it first. Almost nothing needs this — a request is one session for one
+    workspace — but provisioning and the demo seeder legitimately build several
+    in a row, and without it the second one reads the first one's rows.
+    """
+    if workspace_id is None:
+        session.info.pop(_SCOPE_KEY, None)
+    else:
+        session.info[_SCOPE_KEY] = workspace_id
+
+
+def current_scope(session: AsyncSession) -> uuid.UUID | None:
+    """The workspace this session is currently filtered to, if any."""
+    scope: uuid.UUID | None = session.info.get(_SCOPE_KEY)
+    return scope
 
 
 class WorkspaceMismatchError(RuntimeError):

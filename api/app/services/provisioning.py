@@ -46,6 +46,7 @@ from app.models.enums import PermissionGrant
 from app.models.permission import TemplateFieldGrant
 from app.services.fields import BUILTIN_FIELDS
 from app.tenancy.features import DEFAULT_ENABLED
+from app.tenancy.session import bind_scope, current_scope
 
 __all__ = [
     "EXPECTED_STEPS",
@@ -518,26 +519,48 @@ class WorkspaceProvisioner:
         self._session.add(workspace)
         await self._session.flush()
 
-        await self._registry.run_all(self._session, workspace)
+        # Point the session's scope at the workspace being created, before any
+        # step reads anything back.
+        #
+        # `ScopedSession` stores its workspace on `session.info`, where the ORM
+        # execute listener finds it — which makes the scope **sticky on the
+        # underlying session**, not on the wrapper. Provisioning a second
+        # workspace through a session that has already been scoped to a first
+        # therefore had every read silently filtered to the wrong tenant, and
+        # the symptom was `NoResultFound` on this class's own Root-template
+        # lookup a few lines below.
+        #
+        # Harmless in a request, which is one session for one workspace. Found
+        # by the demo seeder, which builds several in a row.
+        previous_scope = current_scope(self._session)
+        bind_scope(self._session, workspace.id)
+        try:
+            await self._registry.run_all(self._session, workspace)
 
-        root = await self._session.execute(
-            select(PermissionTemplate)
-            .where(
-                PermissionTemplate.workspace_id == workspace.id,
-                PermissionTemplate.name == ROOT_TEMPLATE_NAME,
+            root = await self._session.execute(
+                select(PermissionTemplate)
+                .where(
+                    PermissionTemplate.workspace_id == workspace.id,
+                    PermissionTemplate.name == ROOT_TEMPLATE_NAME,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        root_template = root.scalar_one()
+            root_template = root.scalar_one()
 
-        membership = Membership(
-            workspace_id=workspace.id,
-            user_id=owner.id,
-            template_id=root_template.id,
-            has_license=True,
-        )
-        self._session.add(membership)
-        await self._session.flush()
+            membership = Membership(
+                workspace_id=workspace.id,
+                user_id=owner.id,
+                template_id=root_template.id,
+                has_license=True,
+            )
+            self._session.add(membership)
+            await self._session.flush()
+        finally:
+            # Restored, not left pointing here. Provisioning is a step inside
+            # somebody else's request as often as it is the whole job, and
+            # silently re-pointing their session at a workspace they did not
+            # ask about would be a second bug of the same shape as the first.
+            bind_scope(self._session, previous_scope)
 
         return workspace, membership
 

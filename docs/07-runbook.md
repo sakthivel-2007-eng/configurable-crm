@@ -173,6 +173,29 @@ is a backup nobody ever restored.
 Last drill run: 22 Aug 2026 — 50,000 leads and 241,403 actions, counts matched
 and values readable.
 
+## 8a. Capacity
+
+Last measured 22 Aug 2026 at **500,000 leads across 5 workspaces**, from a
+tenant in the middle of the five:
+
+| Query | p95 | Budget |
+|---|---|---|
+| first page | 89ms | 300ms |
+| deep page (offset 80,000) | 144ms | 300ms |
+| free-text search | 23ms | 300ms |
+| sort by an indexed field | 55ms | 300ms |
+| no outgoing call in 14 days | 139ms | 300ms |
+| leads by stage | 53ms | 500ms |
+| funnel | 54ms | 500ms |
+
+The number that matters is not the total — it is that one tenant's latency does
+not move because four others exist. Re-run after any change to indexing or the
+filter compiler:
+
+```bash
+cd api && PERF_500K=1 uv run pytest tests/test_performance.py -k multi_tenant -s
+```
+
 ---
 
 ## 9. Metrics

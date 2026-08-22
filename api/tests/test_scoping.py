@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.factories import WorkspaceFixture, add_member, build_workspace
 
 from app.auth.passwords import PasswordHasherService
-from app.models import Membership, PermissionTemplate
+from app.models import Membership, PermissionTemplate, User
 from app.tenancy.scoping import resolve_visible_membership_ids
 from app.tenancy.session import ScopedSession, WorkspaceMismatchError
 
@@ -213,3 +213,62 @@ async def test_visibility_of_an_unknown_membership_is_empty(
         membership_id=uuid.uuid4(),
     )
     assert visible == frozenset()
+
+
+async def test_the_scope_follows_the_workspace_being_provisioned(
+    db_session: AsyncSession, hasher: PasswordHasherService
+) -> None:
+    """Provisioning a second workspace through an already-scoped session.
+
+    The tenant scope lives on the SQLAlchemy session's `info`, where the ORM
+    execute listener finds it — so it is **sticky on the session**, not on the
+    `ScopedSession` wrapper that set it. A session scoped to workspace A and
+    then used to provision workspace B had every read inside provisioning
+    silently filtered to A, and surfaced as `NoResultFound` on provisioning's
+    own Root-template lookup.
+
+    Harmless in a request, which is one session for one workspace. Found by the
+    demo seeder building five workspaces in a row for M11's 500k pass, and it
+    would have bitten anything else that walks tenants on a shared session.
+    """
+    from app.services.provisioning import WorkspaceProvisioner
+    from app.tenancy.session import current_scope
+
+    first = await build_workspace(db_session, hasher, name="First", owner_email="first@example.com")
+    # Scope the session to the first workspace, as a request would.
+    ScopedSession(db_session, first.workspace.id)
+    assert current_scope(db_session) == first.workspace.id
+
+    second_owner = User(
+        email="second@example.com",
+        full_name="Second Owner",
+        password_hash=hasher.hash("a-long-enough-password"),
+    )
+    db_session.add(second_owner)
+    await db_session.flush()
+
+    workspace, membership = await WorkspaceProvisioner(db_session).provision(
+        name="Second", owner=second_owner
+    )
+    await db_session.commit()
+
+    assert membership.workspace_id == workspace.id
+
+    # The caller's scope is restored, not re-pointed: provisioning is often a
+    # step inside somebody else's request, and silently moving their session to
+    # a workspace they did not ask about would be a second bug of the first's
+    # shape.
+    assert current_scope(db_session) == first.workspace.id
+
+    # So reading the new workspace back takes its own scope — which is exactly
+    # what `ScopedSession` is for.
+    second = ScopedSession(db_session, workspace.id)
+    templates = (await second.execute(second.select(PermissionTemplate))).scalars().all()
+    assert len(templates) == 5, "the second workspace was provisioned under the first one's scope"
+    assert {t.name for t in templates} == {
+        "Root",
+        "Admin",
+        "Manager",
+        "Caller",
+        "Marketing",
+    }

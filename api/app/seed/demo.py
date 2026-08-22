@@ -199,10 +199,14 @@ class DemoSeeder:
         *,
         lead_count: int = 50_000,
         seed: int = 42,
+        run_suffix: str | None = None,
     ) -> None:
         self._session = session
         self._engine = engine
         self._lead_count = lead_count
+        #: Distinguishes one run's cast from another's. `users.email` is unique
+        #: across the database, so without this the seeder can only run once.
+        self._run_suffix = run_suffix
         # Seeded explicitly so two runs produce the same workspace: a
         # performance number that moved because the data moved tells you
         # nothing about the code.
@@ -262,12 +266,29 @@ class DemoSeeder:
             seconds=round(time.monotonic() - started, 1),
         )
 
+    def _namespaced(self, email: str) -> str:
+        """`nadia@…` for the first run, `nadia+2@…` for the second.
+
+        A plus-address rather than a different local part, so the cast is still
+        recognisably the same people across runs when somebody is reading two
+        workspaces side by side.
+        """
+        if self._run_suffix is None:
+            return email
+        local, _, domain = email.partition("@")
+        return f"{local}+{self._run_suffix}@{domain}"
+
     # --- configuration -----------------------------------------------------
 
     async def _create_user(self, member: tuple[str, str, str, str]) -> User:
         _, full_name, email, _ = member
         user = User(
-            email=email,
+            # Namespaced per run. `users.email` is unique across the whole
+            # database — a person exists above any one workspace — so the fixed
+            # cast list meant the seeder could only ever run once per database.
+            # M11's perf pass needs five workspaces at a time, and "seed a
+            # second demo workspace" is a reasonable thing to want besides.
+            email=self._namespaced(email),
             full_name=full_name,
             # Deliberately not a usable credential. A seeded login would be a
             # shipped default password, and this workspace is for reading.

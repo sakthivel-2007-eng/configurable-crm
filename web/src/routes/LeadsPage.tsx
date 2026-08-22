@@ -50,7 +50,7 @@ import {
   useTableLayout,
 } from '@/features/filters/api'
 import { FilterBuilder } from '@/features/filters/FilterBuilder'
-import { useCreateLead, useMessageTemplates } from '@/features/leads/api'
+import { useCreateLead, useLead, useMessageTemplates } from '@/features/leads/api'
 import { ColumnPicker } from '@/features/leads/ColumnPicker'
 import { LeadDetail } from '@/features/leads/LeadDetail'
 import { BUILTIN_COLUMN_IDS, DEFAULT_COLUMNS } from '@/features/leads/columns'
@@ -209,7 +209,15 @@ export function LeadsPage() {
   const rendererFor = (field: LeadField) =>
     fieldTypes.data?.find((spec) => spec.key === field.field_type)?.renderer
 
-  const selected = (results.data?.items ?? []).find((lead) => lead.id === selectedId) ?? null
+  // The row from the list, used only to open the panel without a blank frame.
+  const listRow = (results.data?.items ?? []).find((lead) => lead.id === selectedId) ?? null
+  // The *whole* lead. The list narrows `values` to the chosen columns so a
+  // fifty-field workspace does not ship fifty values per row — which means a
+  // field nobody put in the table came back absent, and the detail panel
+  // rendered it as "no fields are visible to your permission template". On a
+  // fresh workspace, where every column is a built-in, that was every field.
+  const detail = useLead(workspaceId, selectedId)
+  const selected = detail.data ?? listRow
   const ruleCount = filterNode.children.length
 
   function applySavedFilter(id: string) {

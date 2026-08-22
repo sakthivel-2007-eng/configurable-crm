@@ -304,7 +304,14 @@ export function LeadDetail({
         })}
         {visibleFields.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            No fields are visible to your permission template.
+            {/* Two very different situations look identical here, and saying
+                the wrong one is worse than saying nothing: before the schema
+                query resolves `fields` is empty too, and blaming a permission
+                template for a request still in flight sends somebody to the
+                permissions screen to fix a problem that does not exist. */}
+            {fields.length === 0
+              ? 'Loading fields…'
+              : 'No fields are visible to your permission template.'}
           </p>
         ) : null}
       </section>

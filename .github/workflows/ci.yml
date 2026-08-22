@@ -68,6 +68,12 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
+        with:
+          # `uses:` steps ignore `defaults.run.working-directory`, so the action
+          # looks for `packageManager` in a root package.json that does not
+          # exist here. Point it at the one that does, rather than pinning the
+          # version twice and letting the two drift.
+          package_json_file: web/package.json
 
       - name: Install Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4

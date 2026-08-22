@@ -167,6 +167,12 @@ services:
       target: dev
     environment:
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      # pnpm wants to purge `node_modules` when the mounted volume disagrees
+      # with the lockfile, and refuses to do it unprompted without a TTY — so
+      # the container exits 1 before Vite ever starts. `CI` is pnpm's own
+      # documented answer, and a container running unattended *is* CI by any
+      # reasonable reading.
+      CI: 'true'
     ports:
       - "${WEB_PORT:-5173}:5173"
     volumes:

@@ -126,6 +126,13 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
 
-    @staticmethod
-    def redis_settings() -> RedisSettings:
-        return RedisSettings.from_dsn(get_settings().redis_url)
+    #: An **attribute**, not a method. `arq` reads `WorkerSettings.redis_settings`
+    #: and immediately asks it for `.host`; a `@staticmethod` here type-checks,
+    #: imports, and passes every unit test, then dies on the first line of the
+    #: real worker with `'staticmethod' object has no attribute 'host'`.
+    #:
+    #: Nothing caught it because the tests call `tick()` and `dispatch()`
+    #: directly — the arq entry point was only ever exercised by running the
+    #: container. `test_the_arq_entry_point_matches_what_arq_expects` now
+    #: covers the contract.
+    redis_settings: ClassVar[RedisSettings] = RedisSettings.from_dsn(get_settings().redis_url)

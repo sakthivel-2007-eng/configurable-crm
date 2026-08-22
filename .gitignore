@@ -36,3 +36,7 @@ Thumbs.db
 
 # Local data volumes
 .data/
+
+# pnpm's content-addressable store, created when the container installs
+# dependencies against the bind-mounted source tree.
+web/.pnpm-store/

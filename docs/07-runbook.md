@@ -124,6 +124,24 @@ answer worth waiting for.
 The workspace model is **invite-only**. There is no registration; an account
 exists because somebody invited it.
 
+### The very first account
+
+A fresh deployment has none, and invite-only is a closed loop until something
+opens it from outside. Run once, by whoever installs this:
+
+```bash
+cd api && uv run python -m app.bootstrap \
+  --email you@example.com --name "Your Name" --workspace "Your Company"
+```
+
+It prints a single-use link for the owner to set their password, and refuses if
+the deployment already has users. There is deliberately no endpoint for this —
+one that minted the first owner would be one an attacker races you to.
+
+**There are no default credentials.** Nothing in this codebase creates an
+`admin@example.com` or anything like it; if a sign-in is being rejected on a
+fresh install, this is why.
+
 - **Never signed in** — the invitation link is single-use and expires after 7
   days. Re-invite, or have them use *Forgotten your password?*.
 - **Link says it is not valid** — expired, already used, or superseded by a

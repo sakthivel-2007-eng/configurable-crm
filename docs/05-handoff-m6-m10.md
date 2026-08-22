@@ -620,6 +620,46 @@ unknown field and show it stored with a warning.
 
 ## 8. M11 — Hardening *(6–8 days)*
 
+> **Update, 22 Aug 2026 — M11 has landed, less deployment.** `80bcaf8`
+> (accounts, observability, matrix, backups), `1604776` (bootstrap + the
+> empty-workspace drill), `461412c` (the 500k pass). Revision
+> `0011_m11_credentials`. 706 backend tests, 139 Playwright plus 5 live.
+>
+> **Production images and hosting are deliberately deferred** at the owner's
+> direction; both Dockerfiles still say "deployment images land in M11", and
+> that comment now outlives the milestone. Everything else was exercised
+> locally, which closes eight of the ten items.
+>
+> Five things this milestone found rather than built:
+>
+> - **The invite flow was a dead end.** `invite_member` created an account with
+>   an unguessable password and a docstring promising a password reset that did
+>   not exist. Every invited user held an account they could never sign in to.
+> - **Invite-only had no first account.** An account exists because somebody
+>   invited it, and a fresh deployment has nobody to do the inviting.
+>   `python -m app.bootstrap` opens the loop from outside — a command, not an
+>   endpoint, because an endpoint that mints the first owner is one an attacker
+>   races the operator to.
+> - **A lead field you had not added as a table column was uneditable.** The
+>   list narrows `values` to the chosen columns; the detail panel was fed that
+>   narrowed row and blamed a permission template for the absence. On a fresh
+>   workspace, where every column is a built-in, that was every field. Found by
+>   the first honest run of the empty-workspace E2E, which is the entire
+>   argument for writing it — 139 stubbed specs never could, because a stub is
+>   where that assumption hides.
+> - **The tenant scope is sticky on the SQLAlchemy session**, not on the
+>   `ScopedSession` wrapper. Provisioning a second workspace through an
+>   already-scoped session read the first one's rows. Harmless in a request,
+>   which is why it survived eleven milestones; fatal to anything that walks
+>   tenants on one session.
+> - **The demo seeder could only run once per database**, because `users.email`
+>   is unique database-wide and its cast list was fixed.
+>
+> Capacity, measured rather than assumed: **500,000 leads across 5 workspaces**,
+> every shape inside budget from a tenant in the middle of the five. The numbers
+> and the command are in `docs/07-runbook.md` §8a.
+
+
 Out of scope for this document, but note what it inherits: self-serve signup
 (there is none — see §2), a 500k-lead perf pass, structlog with request and
 workspace ids, Sentry, Prometheus, a **restore drill actually run**, and a

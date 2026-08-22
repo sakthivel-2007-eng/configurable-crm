@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 
 import { ApiError } from '@/api/client'
 import { Button } from '@/components/ui/button'
@@ -100,6 +100,16 @@ export function LoginPage() {
             <Button type="submit" disabled={submitting}>
               {submitting ? 'Signing in…' : 'Sign in'}
             </Button>
+
+            {/* Without this the reset flow exists and nobody can reach it —
+                and since the workspace model is invite-only, an invitee whose
+                link expired has no other way back in. */}
+            <Link
+              to="/forgot-password"
+              className="text-muted-foreground text-center text-xs underline"
+            >
+              Forgotten your password?
+            </Link>
           </form>
         </CardContent>
       </Card>

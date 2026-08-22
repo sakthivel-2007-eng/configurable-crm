@@ -4,3 +4,8 @@ pnpm-lock.yaml
 playwright-report
 test-results
 coverage
+
+# pnpm's content-addressable store, created when the container installs
+# dependencies against the bind-mounted tree. Gigabytes of hashed blobs,
+# and `format:check` walks all of them.
+.pnpm-store/

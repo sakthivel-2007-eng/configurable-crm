@@ -91,6 +91,22 @@ class Settings(BaseSettings):
     # --- Health ------------------------------------------------------------
     health_check_timeout_seconds: float = 5.0
 
+    #: Where the set-password link points. Not derived from the request host:
+    #: a link built from an attacker-supplied Host header is a password-reset
+    #: link that arrives in the right inbox and points at the wrong site.
+    app_base_url: str = "http://localhost:5173"
+
+    # --- Observability (M11) -----------------------------------------------
+    #: Unset means Sentry is off. Neither reporting nor metrics may become a
+    #: reason the API will not start — an observability dependency that can take
+    #: the product down has inverted its own purpose.
+    sentry_dsn: str | None = None
+    sentry_traces_sample_rate: float = 0.0
+    #: `/metrics` is unauthenticated by design, so it must not be reachable from
+    #: the internet. Off unless a deployment turns it on and puts it behind
+    #: something.
+    metrics_enabled: bool = False
+
     # --- Outbound email (M8) -----------------------------------------------
     # Scheduled reports and recurring-date greetings both need a transport.
     # With no host configured the sender is a no-op that records what it would

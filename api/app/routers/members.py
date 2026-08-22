@@ -12,13 +12,14 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy import select
 
 from app.auth.deps import get_password_hasher
 from app.auth.passwords import PasswordHasherService
 from app.errors import conflict, unprocessable
 from app.models import Membership, User
+from app.routers.auth import send_credential_email
 from app.schemas.common import Page, PageParams, page_params
 from app.schemas.member import (
     AvailabilityLogEntry,
@@ -32,6 +33,7 @@ from app.schemas.member import (
     MemberUpdate,
     SeatUsage,
 )
+from app.services.credentials import CredentialService, TokenPurpose
 from app.services.lead_ownership import LeadOwnership, get_lead_ownership
 from app.services.member_import import MemberImportService
 from app.services.members import HierarchyNode, MemberService
@@ -143,6 +145,7 @@ async def seat_usage(
 )
 async def invite_member(
     payload: MemberInvite,
+    request: Request,
     scope: Annotated[WorkspaceScope, Depends(require_workspace_admin)],
     service: Annotated[MemberService, Depends(_admin_member_service)],
     hasher: Annotated[PasswordHasherService, Depends(get_password_hasher)],
@@ -172,7 +175,17 @@ async def invite_member(
         manager_id=payload.manager_id,
         grant_license=payload.grant_license,
     )
+
+    # Issue the link *before* committing, so an invitation and the credential
+    # that makes it usable are one transaction. Until M11 this endpoint created
+    # an account with an unguessable password and sent nothing, which left every
+    # invited person holding an account they could never sign in to — the
+    # docstring above promised a password reset that did not exist.
+    issued = await CredentialService(scope.session.raw).issue(
+        user=user, purpose=TokenPurpose.INVITE
+    )
     await scope.session.commit()
+    await send_credential_email(request, user=user, issued=issued)
     return _detail(await service.get(membership.id))
 
 

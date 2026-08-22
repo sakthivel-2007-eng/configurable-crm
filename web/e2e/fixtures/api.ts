@@ -700,6 +700,8 @@ export interface StubOptions {
   readonly dashboards?: Record<string, unknown>[]
   /** Buckets `/dashboard/leads-by-stage` and `/reports/funnel` return. */
   readonly stageBuckets?: Record<string, unknown>[]
+  /** What `POST /auth/password-reset/confirm` answers. */
+  readonly setPasswordResult?: 'ok' | 'invalid_token'
 }
 
 export interface StubHandle {
@@ -743,6 +745,10 @@ export interface StubHandle {
   readonly lastDashboard: () => Record<string, unknown> | null
   /** The `field_key` the page last asked `/reports/breakdown` to group by. */
   readonly lastBreakdown: () => string | null
+  /** The body of the last `POST /auth/password-reset/request`. */
+  readonly lastResetRequest: () => Record<string, unknown> | null
+  /** The body of the last `POST /auth/password-reset/confirm`. */
+  readonly lastSetPassword: () => Record<string, unknown> | null
 }
 
 export interface LastSearch {
@@ -783,6 +789,8 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
   }
 
   const requests: string[] = []
+  let lastResetRequest: Record<string, unknown> | null = null
+  let lastSetPassword: Record<string, unknown> | null = null
   let assignmentRules: Record<string, unknown>[] = [
     ...(options.assignmentRules ?? [
       {
@@ -1254,6 +1262,25 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
         is_readonly: isRoot,
         capabilities: { leads: { admin_access: isRoot } },
       })
+    }
+
+    // --- M11: invitations and password resets ------------------------------
+    if (path.endsWith('/auth/password-reset/request')) {
+      lastResetRequest = route.request().postDataJSON() as Record<string, unknown>
+      // Always 202, whatever the address — the real API refuses to say whether
+      // an account exists, and a stub that leaked it would let a broken page
+      // pass.
+      return json(route, 202, {
+        status: 'accepted',
+        message: 'If that address has an account, a link is on its way.',
+      })
+    }
+    if (path.endsWith('/auth/password-reset/confirm')) {
+      lastSetPassword = route.request().postDataJSON() as Record<string, unknown>
+      if (options.setPasswordResult === 'invalid_token') {
+        return apiError(route, 400, 'invalid_token')
+      }
+      return json(route, 200, { status: 'ok', message: 'Password set. Sign in with it.' })
     }
 
     // --- M9: reports and dashboards ----------------------------------------
@@ -1989,6 +2016,8 @@ export async function stubApi(page: Page, options: StubOptions = {}): Promise<St
     retried: () => retriedIds,
     lastDashboard: () => lastDashboardBody,
     lastBreakdown: () => lastBreakdownField,
+    lastResetRequest: () => lastResetRequest,
+    lastSetPassword: () => lastSetPassword,
     expireAccessToken: () => {
       accessTokenExpired = true
     },

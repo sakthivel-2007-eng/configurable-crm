@@ -35,6 +35,14 @@ dependencies = [
     # for the test client, which would have made the dispatcher an ImportError
     # in production and nowhere else.
     "httpx>=0.28.0",
+    # M11 observability. structlog carries the request and workspace ids that
+    # make a production error traceable to a tenant; without them a stack trace
+    # says what broke and nothing about for whom.
+    "structlog>=25.1.0",
+    # Both optional at runtime: Sentry needs a DSN and Prometheus needs a
+    # scraper, and the app must start cleanly with neither.
+    "sentry-sdk[fastapi]>=2.20.0",
+    "prometheus-client>=0.21.0",
 ]
 
 [dependency-groups]

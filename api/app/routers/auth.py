@@ -8,6 +8,8 @@ outside the workspace prefix.
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 import uuid
 from typing import Annotated
 
@@ -26,20 +28,26 @@ from app.auth.rate_limit import AuthRateLimiter, RateLimitExceededError
 from app.auth.tokens import TokenService
 from app.dependencies import get_session
 from app.errors import api_error, not_found
-from app.models import Membership
+from app.models import Membership, User
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginRequest,
     LogoutRequest,
     MembershipSummary,
     MeResponse,
+    PasswordResetConfirm,
+    PasswordResetRequest,
     RefreshRequest,
     ResolvedPermissions,
     TokenResponse,
     UserSummary,
 )
 from app.services.auth import AuthService
+from app.services.credentials import CredentialService, IssuedResetToken, TokenPurpose
+from app.services.email import Outgoing, build_sender
 from app.tenancy.scoping import resolve_visible_membership_ids
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
 
@@ -247,3 +255,101 @@ async def my_permissions(
         visible_membership_ids=sorted(visible),
         sees_all_members=sees_all,
     )
+
+
+async def send_credential_email(
+    request: Request,
+    *,
+    user: User,
+    issued: IssuedResetToken,
+) -> None:
+    """Mail the link. Best effort — never fails the caller.
+
+    With no SMTP host configured the sender records instead of delivering, so
+    local runs and tests can assert on it without anything reaching a real
+    address. See `services/email.py`.
+    """
+    settings = request.app.state.settings
+    sender = getattr(request.app.state, "email_sender", None) or build_sender(settings)
+
+    invited = issued.purpose == TokenPurpose.INVITE
+    link = f"{settings.app_base_url.rstrip('/')}/set-password?token={issued.token}"
+    hours = int((issued.expires_at - dt.datetime.now(dt.UTC)).total_seconds() // 3600)
+
+    try:
+        await sender.send(
+            Outgoing(
+                to=(user.email,),
+                subject=(
+                    "You have been invited to a workspace" if invited else "Set a new password"
+                ),
+                body=(
+                    f"Hello {user.full_name},\n\n"
+                    + (
+                        "Somebody has invited you to a workspace. "
+                        if invited
+                        else "Somebody asked to reset the password for this address. "
+                    )
+                    + f"Use this link to choose a password:\n\n{link}\n\n"
+                    f"It works once, and expires in about {max(hours, 1)} hours.\n\n"
+                    "If you were not expecting this, you can ignore it — "
+                    "nothing changes until the link is used.\n"
+                ),
+            )
+        )
+    except Exception:
+        logger.exception("credential_email.failed", extra={"user": str(user.id)})
+
+
+@router.post(
+    "/auth/password-reset/request",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ask for a set-password link",
+)
+async def request_password_reset(
+    payload: PasswordResetRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, str]:
+    """Always answers the same, whether or not the address exists.
+
+    Anything else turns this into a membership oracle: a prober works through a
+    list of addresses and learns which ones have accounts. For a B2B product
+    "does this company use this tool" is itself commercially interesting, so the
+    answer is identical either way and the mail — or its absence — is the only
+    difference.
+    """
+    service = CredentialService(session)
+    user = await service.find_user(str(payload.email))
+
+    if user is not None and user.is_active:
+        issued = await service.issue(user=user, purpose=TokenPurpose.RESET)
+        await session.commit()
+        await send_credential_email(request, user=user, issued=issued)
+
+    return {
+        "status": "accepted",
+        "message": "If that address has an account, a link is on its way.",
+    }
+
+
+@router.post(
+    "/auth/password-reset/confirm",
+    status_code=status.HTTP_200_OK,
+    summary="Redeem a link and set a password",
+)
+async def confirm_password_reset(
+    payload: PasswordResetConfirm,
+    hasher: Annotated[PasswordHasherService, Depends(get_password_hasher)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, str]:
+    """Spend the token, set the password, and end every existing session.
+
+    Somebody resetting a password is very often somebody who believes their
+    account is compromised; leaving their other sessions live would make the
+    reset theatre.
+    """
+    service = CredentialService(session)
+    await service.redeem(token=payload.token, password_hash=hasher.hash(payload.new_password))
+    await session.commit()
+    return {"status": "ok", "message": "Password set. Sign in with it."}

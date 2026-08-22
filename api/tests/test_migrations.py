@@ -55,6 +55,7 @@ EXPECTED_REVISIONS = [
     # numbers, and renumbering an applied revision is what CLAUDE.md
     # forbids.
     "0010_m9_dashboards",
+    "0011_m11_credentials",
 ]
 
 

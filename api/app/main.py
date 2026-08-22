@@ -11,13 +11,20 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.auth.passwords import PasswordHasherService
 from app.cache import create_redis
 from app.config import Settings, get_settings
 from app.db import create_engine, create_session_factory
+from app.observability import (
+    METRICS,
+    ObservabilityMiddleware,
+    configure_logging,
+    configure_sentry,
+)
 from app.routers import auth as auth_router
 from app.routers import fields as fields_router
 from app.routers import health as health_router
@@ -74,7 +81,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
-    logging.basicConfig(level=resolved.log_level.upper())
+    configure_logging(resolved)
+    sentry_on = configure_sentry(resolved)
 
     app = FastAPI(
         title=resolved.project_name,
@@ -85,6 +93,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved
+    app.state.sentry_enabled = sentry_on
+
+    # Outermost, so a request id exists before anything else can log — including
+    # CORS rejections and validation errors, which are exactly the ones somebody
+    # will later ask about by id.
+    app.add_middleware(ObservabilityMiddleware)
+
+    if resolved.metrics_enabled:
+
+        @app.get("/metrics", include_in_schema=False)
+        async def metrics() -> Response:
+            """Prometheus exposition. Unauthenticated, hence opt-in.
+
+            Metrics leak shape — request rates, tenant counts, queue depths —
+            so this is off unless a deployment turns it on and puts it behind
+            something that is not the public internet.
+            """
+            return Response(generate_latest(METRICS.registry), media_type=CONTENT_TYPE_LATEST)
 
     # `leads` exists from M5, so the member lifecycle gets the real open-lead
     # count instead of the M1 placeholder that always answered zero. Registered

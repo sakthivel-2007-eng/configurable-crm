@@ -84,6 +84,18 @@ class ScopedSession:
         session.info[_SCOPE_KEY] = workspace_id
 
     @property
+    def raw(self) -> AsyncSession:
+        """The unscoped session, for the handful of *global* tables.
+
+        `users`, `refresh_tokens` and `password_reset_tokens` are not tenant
+        data — a person exists across workspaces — so the scoping criteria that
+        protects every other table has nothing to say about them. Named
+        explicitly rather than reached for by accident: a caller writing
+        `scope.raw` is stating that what follows is deliberately unscoped.
+        """
+        return self._session
+
+    @property
     def workspace_id(self) -> uuid.UUID:
         return self._workspace_id
 

@@ -29,6 +29,7 @@ from app.auth.deps import CurrentUser, get_current_user
 from app.dependencies import get_session
 from app.errors import forbidden, not_found
 from app.models import LeadField, Membership, PermissionTemplate, Workspace
+from app.observability import bind_workspace
 from app.permissions.capabilities import Capabilities
 from app.permissions.projection import (
     FieldGrants,
@@ -194,6 +195,11 @@ async def require_workspace(
         workspace_id=workspace_id,
         membership_id=membership.id,
     )
+
+    # The first point in a request where a tenant exists. Every log line after
+    # this carries it, which is what turns "the CRM is slow" into "this
+    # workspace's queries are slow".
+    bind_workspace(workspace_id)
 
     scoped = ScopedSession(session, workspace_id)
     template = membership.template

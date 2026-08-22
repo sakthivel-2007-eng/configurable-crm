@@ -63,7 +63,7 @@ from app.models.lead import (
 from app.models.mixins import Base, TenantModel, TimestampMixin
 from app.models.permission import TemplateFieldGrant, TemplateLeadView
 from app.models.pipeline import CallDisposition, LostReason, Stage
-from app.models.user import RefreshToken, User
+from app.models.user import PasswordResetToken, RefreshToken, User
 from app.models.view import SavedFilter, TableLayout
 from app.models.work import ImportJob, Label, LeadLabel, Task
 from app.models.workspace import (
@@ -111,6 +111,7 @@ __all__ = [
     "MessageTemplate",
     "OutboxEvent",
     "OutboxStatus",
+    "PasswordResetToken",
     "PermissionGrant",
     "PermissionTemplate",
     "RefreshToken",

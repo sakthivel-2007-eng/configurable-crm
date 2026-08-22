@@ -129,6 +129,11 @@ M10_TABLES = {
 # were nobody's.
 M9_TABLES = {"dashboards"}
 
+# M11. The workspace model is invite-only, so this table is *the* account
+# creation path — and like `users` and `refresh_tokens` it is global rather
+# than tenant data, because a person exists across workspaces.
+M11_TABLES = {"password_reset_tokens"}
+
 
 def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> None:
     """No table exists before the milestone that owns it."""
@@ -143,6 +148,7 @@ def test_the_schema_defines_exactly_the_tables_the_landed_milestones_own() -> No
         | M8_TABLES
         | M10_TABLES
         | M9_TABLES
+        | M11_TABLES
     )
 
 
@@ -164,7 +170,16 @@ def test_every_tenant_table_carries_workspace_id() -> None:
     exceptions: a user is global, a workspace *is* the tenant, and a refresh
     token belongs to a user across every workspace they hold.
     """
-    global_tables = {"users", "workspaces", "refresh_tokens"}
+    # Deliberately global, not an oversight: a person and their credentials
+    # exist across workspaces, so there is no tenant to scope them to. Adding
+    # to this set is a decision — anything holding *customer* data belongs on
+    # the other side of it (architecture rule 1).
+    global_tables = {
+        "users",
+        "workspaces",
+        "refresh_tokens",
+        "password_reset_tokens",
+    }
 
     for name, table in Base.metadata.tables.items():
         if name in global_tables:

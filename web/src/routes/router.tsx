@@ -9,7 +9,9 @@ import { FieldSettingsPage } from '@/routes/FieldSettingsPage'
 import { ImportPage } from '@/routes/ImportPage'
 import { IntegrationsPage } from '@/routes/IntegrationsPage'
 import { LeadsPage } from '@/routes/LeadsPage'
+import { ForgotPasswordPage } from '@/routes/ForgotPasswordPage'
 import { LoginPage } from '@/routes/LoginPage'
+import { SetPasswordPage } from '@/routes/SetPasswordPage'
 import { MembersPage } from '@/routes/MembersPage'
 import { AssignmentSettingsPage } from '@/routes/AssignmentSettingsPage'
 import { PermissionsPage } from '@/routes/PermissionsPage'
@@ -23,6 +25,9 @@ import { WorkspacePickerPage } from '@/routes/WorkspacePickerPage'
 
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
+  // Unauthenticated by design — this is where every account begins.
+  { path: '/set-password', element: <SetPasswordPage /> },
+  { path: '/forgot-password', element: <ForgotPasswordPage /> },
   {
     // Signed in, but no workspace chosen yet — the picker sits between the two
     // guards, so it must not require an active workspace itself.

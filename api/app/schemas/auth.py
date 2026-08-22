@@ -12,6 +12,8 @@ __all__ = [
     "LogoutRequest",
     "MeResponse",
     "MembershipSummary",
+    "PasswordResetConfirm",
+    "PasswordResetRequest",
     "RefreshRequest",
     "TokenResponse",
     "UserSummary",
@@ -121,3 +123,20 @@ class ResolvedPermissions(BaseModel):
     visible_membership_ids: list[uuid.UUID]
     sees_all_members: bool
     field_grants: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class PasswordResetRequest(BaseModel):
+    """Ask for a set-password link."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    """Redeem a link and choose a password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
